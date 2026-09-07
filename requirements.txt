@@ -1,3 +1,7 @@
 PyAudioWPatch==0.2.12.7
 numpy>=1.26
 openai-whisper>=20231117
+
+# Opcional, solo si usas transcribe_teams.py --diarize (identificacion de
+# hablantes). Requiere token de HuggingFace, ver README.md.
+# pyannote.audio>=3.1

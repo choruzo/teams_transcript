@@ -104,3 +104,52 @@ modelo `large-v3`, la transcripción será mucho más rápida que en CPU.
 - Verifica la versión exacta de CUDA soportada por el driver instalado en el
   servidor (`nvidia-smi` muestra "CUDA Version: X.Y" en la esquina superior
   derecha) antes de elegir el índice de PyTorch (`cu121`, `cu124`, etc.).
+
+## 5. Diarización (`--diarize`) en el servidor sin acceso a huggingface.co
+
+Si el servidor tiene acceso a PyPI pero no a `huggingface.co` (caso típico:
+salida a internet restringida a repos de paquetes), puedes instalar
+`pyannote.audio` normalmente con pip, pero los modelos hay que llevarlos a
+mano porque no se podrán descargar en el servidor.
+
+### a) Instalar pyannote.audio (con acceso a PyPI)
+
+```bash
+pip install "pyannote.audio>=3.1"
+```
+
+### b) Copiar la caché de modelos de HuggingFace ya descargada
+
+En este PC Windows (con internet y con las condiciones de uso ya aceptadas
+en huggingface.co para los 3 modelos gated), la caché está en:
+
+```
+%USERPROFILE%\.cache\huggingface\hub\
+  models--pyannote--segmentation-3.0
+  models--pyannote--speaker-diarization-3.1
+  models--pyannote--speaker-diarization-community-1
+  models--pyannote--wespeaker-voxceleb-resnet34-LM
+```
+
+Copia la carpeta `hub` completa (USB, `scp`, red interna...) a la ruta
+equivalente en el servidor:
+
+```
+~/.cache/huggingface/hub/
+```
+
+### c) Ejecutar en modo offline
+
+Con la caché ya en su sitio, no hace falta token: define
+`HF_HUB_OFFLINE=1` para que `huggingface_hub` no intente contactar con
+`huggingface.co` en ningún momento (ni para comprobar actualizaciones) y use
+solo lo que ya tiene en caché.
+
+```bash
+export HF_HUB_OFFLINE=1
+python transcribe_teams.py mixed.wav --diarize --device cuda
+```
+
+Si el servidor SÍ tuviera acceso a `huggingface.co`, la alternativa más
+simple es no copiar nada y pasar `--hf-token`/`HF_TOKEN` como en Windows,
+dejando que descargue los modelos directamente ahí.

@@ -75,6 +75,75 @@ audios largos; con `--model tiny` o `--model base` va razonablemente rápido
 para pruebas. Cuando uses una máquina con GPU NVIDIA, instala la build de
 PyTorch con soporte CUDA y usa `--model medium`/`large` sin problema.
 
+## Uso: identificar hablantes (diarización)
+
+Con `--diarize`, además de transcribir, identifica qué segmentos pertenecen
+a cada hablante usando [pyannote.audio](https://github.com/pyannote/pyannote-audio)
+y añade una etiqueta `[SPEAKER_00]`, `[SPEAKER_01]`, etc. a cada línea del
+`.txt`/`.srt`.
+
+1. Instala la dependencia opcional (no incluida por defecto porque es
+   pesada y requiere un token):
+
+   ```powershell
+   .\.venv\Scripts\python.exe -m pip install "pyannote.audio>=3.1"
+   ```
+
+2. Crea un token de acceso en <https://huggingface.co/settings/tokens> (rol
+   "Read" es suficiente) y acepta las condiciones de uso de estos dos
+   modelos con esa misma cuenta (son formularios rápidos, se aprueban al
+   instante):
+   - <https://huggingface.co/pyannote/speaker-diarization-3.1>
+   - <https://huggingface.co/pyannote/segmentation-3.0>
+
+3. Ejecuta la transcripción con `--diarize`, pasando el token con
+   `--hf-token` o mediante la variable de entorno `HF_TOKEN`:
+
+   ```powershell
+   $env:HF_TOKEN = "hf_xxx"
+   .\.venv\Scripts\python.exe transcribe_teams.py grabaciones\20260907_090437_mixed.wav --diarize
+
+   # o sin variable de entorno:
+   .\.venv\Scripts\python.exe transcribe_teams.py archivo.wav --diarize --hf-token hf_xxx
+
+   # si conoces el numero exacto de participantes, mejora la precision:
+   .\.venv\Scripts\python.exe transcribe_teams.py archivo.wav --diarize --num-speakers 3
+   ```
+
+La diarización es un paso adicional sobre el audio completo y en CPU puede
+tardar tanto o más que la propia transcripción; en GPU (`--device cuda`) es
+mucho más rápida. Las etiquetas (`SPEAKER_00`, ...) son genéricas: pyannote
+no conoce los nombres reales, solo distingue voces distintas.
+
+## Uso: resumir con un LLM local (LiteLLM)
+
+Con `summarize_teams.py` puedes generar un resumen estructurado (Markdown:
+resumen general, por hablante, acciones pendientes, bloqueos) a partir de
+una transcripción `.txt`, usando un LLM servido en local a través de
+[LiteLLM](https://docs.litellm.ai/) (API compatible con OpenAI).
+
+```powershell
+$env:LITELLM_API_KEY = "sk-..."   # pega la key en tu terminal, no en el chat
+.\.venv\Scripts\python.exe summarize_teams.py grabaciones\20260907_090437_mixed.txt
+
+# Elegir modelo (por defecto: qwen3.6-35b-a3b) o URL de LiteLLM
+.\.venv\Scripts\python.exe summarize_teams.py archivo.txt --model qwen3.8-27b
+.\.venv\Scripts\python.exe summarize_teams.py archivo.txt --base-url http://localhost:4000/v1
+
+# Dar pistas de los nombres reales del equipo (ayuda a mapear SPEAKER_XX)
+.\.venv\Scripts\python.exe summarize_teams.py archivo.txt --attendees "Pablo, Javi, Jose Javier"
+```
+
+Genera `<nombre>_resumen.md` junto a la transcripción, con una sección de
+"Mapeo de hablantes" (con nivel de confianza alta/media/baja), resumen
+general, estado por persona, acciones pendientes y bloqueos/riesgos.
+Funciona mejor sobre transcripciones generadas con `--diarize` (ver arriba),
+ya que puede diferenciar qué dijo cada hablante (`SPEAKER_00`, `SPEAKER_01`,
+...); el propio modelo intenta inferir el nombre real a partir del contexto
+de la conversación (o de `--attendees` si se lo indicas) — conviene
+revisar el mapeo, puede equivocarse o marcar "no identificado" si no hay
+contexto suficiente.
+
 ## Notas técnicas
 
 - La captura del audio del sistema solo produce datos mientras el motor de
