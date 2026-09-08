@@ -1,6 +1,7 @@
 # Plan de interfaz: de "scripts" a "memoria del equipo consultable"
 
-Redactado el 2026-09-08. **Propuesta completa, nada implementado todavía.**
+Redactado el 2026-09-08. **Fase D0 implementada** (2026-09-08); el resto es
+propuesta.
 
 Documento complementario de [`PLAN_MEJORAS.md`](PLAN_MEJORAS.md). Aquel define
 el *motor* (glosario, JSON estructurado, SQLite, arrastres, consulta en
@@ -468,7 +469,7 @@ pendientes de decidir, y ninguna bloquea el arranque:
 
 | Orden | Fase | Contenido | Esfuerzo | Depende de |
 |---|---|---|---|---|
-| 0 | **D0 — Deuda previa** | D1 (uid estable), D2 (rutas relativas o remapeo), D5 (conexión de solo lectura) y WAL, en el motor | Bajo | Nada |
+| ~~0~~ | ~~**D0 — Deuda previa**~~ **hecha** | D1 (uid estable), D2 (remapeo de rutas), D5 (conexión de solo lectura), WAL y los primeros tests | Bajo | Nada |
 | 1 | **I0 — Esqueleto** | FastAPI + Docker + `/api/salud` + `/api/reuniones` + una página que las liste | Bajo | D0 |
 | 2 | **I1 — Timeline y métricas** | 3.1 y 3.2 en SVG, filtros en la URL | Medio | I0 |
 | 3 | **I2 — Vista de reunión** | 3.3 sin audio: resumen, secciones, transcripción | Bajo | I0 |
@@ -521,6 +522,60 @@ duplicándola.
   una reunión completa en la base con su transcripción, su resumen y sus
   arrastres, y el progreso se ha podido seguir en vivo.
 
+## 9 bis. Resultado de D0 (2026-09-08)
+
+Ficheros tocados: `memoria.py` y `tests/test_memoria.py` (nuevo). Ni
+`summarize_teams.py` ni `transcribe_teams.py` han necesitado cambios: la
+identidad estable se resuelve entera dentro de `crear_reunion`.
+
+Resuelto: **D1** (`meetings.uid`), **D2** (`ruta_local`), **D5**
+(`conectar(solo_lectura=True)`), **D6** (mecanismo de migración, estrenado con
+la 1 → 2) y WAL. Quedan abiertas D3, D4, D7, D8 y D9, según lo decidido en la
+sección 0.
+
+Decisiones tomadas al implementar:
+
+1. **Se conserva también el `id`, no solo el `uid`.** El plan solo pedía el
+   `uid`, pero reinsertar la fila con el `id` anterior cuesta una línea y evita
+   que cualquier referencia interna quede colgando. La identidad de una reunión
+   pasa a sobrevivir al reprocesado por dos vías independientes.
+2. **El `uid` se deriva del nombre del fichero, no de la ruta completa**
+   (`20260907_090437_mixed`). Mover `grabaciones/` de sitio, o procesar la
+   misma transcripción en otra máquina, no debería cambiar la identidad de la
+   reunión. El precio es que dos ficheros con el mismo nombre en carpetas
+   distintas colisionan; `_uid_disponible` los desempata con un hash corto de
+   la ruta.
+3. **`PRAGMA query_only` en vez de la URI `mode=ro`.** Es el detalle que habría
+   costado una tarde de depuración más adelante: con la base en WAL, una
+   conexión abierta como `mode=ro` no puede crear el fichero `-shm` que SQLite
+   necesita para leer, y falla **justo cuando nadie más está escribiendo**, que
+   es el caso normal. `query_only` da la misma garantía sin ese problema. Hay
+   un test dedicado a ese escenario.
+4. **La migración va antes de `_ESQUEMA`, no después.** Lo destapó el propio
+   test: `_ESQUEMA` crea el índice UNIQUE sobre `meetings.uid`, y en una base
+   v1 esa columna todavía no existe.
+
+Verificado:
+
+- **19 tests, todos en verde** (`python -m unittest discover -s tests`).
+  Cubren identidad estable, colisión de nombres, solo lectura, WAL, remapeo de
+  rutas Windows→Linux, migración e idempotencia de los arrastres.
+- **La prueba de extremo a extremo de la Fase 2 sigue dando lo mismo**: dos
+  dailys con el LLM simulado, arrastres aplicados, reproceso idempotente y
+  `--sin-arrastres` revirtiendo. La reunión reprocesada tres veces conserva
+  `id = 2` y su `uid`; antes de D0 habría ido a parar a los ids 3 y 4.
+- **Migración probada sobre una copia de la base real** (1 reunión, 17
+  acciones, 145 segmentos): pasa a `user_version = 2`, todas las filas
+  intactas, `uid` asignado, FTS5 sincronizada (145) e `integrity_check` a `ok`.
+
+**Pendiente, menor:** las **acciones** no tienen todavía identidad estable —al
+reprocesar se borran y se reinsertan con id nuevo—. No hace falta hasta I6, y
+la clave adecuada (probablemente el par `uid` de la reunión de origen +
+descripción normalizada) se decide entonces, con datos reales delante. Es la
+cuestión abierta 1.
+
+---
+
 ## 10. Deuda que este plan destapa en el motor
 
 Al contrastar las vistas propuestas contra el esquema real de
@@ -531,23 +586,22 @@ parchearlos en la API.
 
 | # | Problema | Dónde | Bloquea |
 |---|---|---|---|
-| D1 | **Los ids de reunión no son estables** | `memoria.crear_reunion(reemplazar=True)` borra e inserta: reprocesar da un id nuevo | I2, I5, 3.8 |
-| D2 | **Rutas absolutas del host** en `audio_path` y `transcript_path` | `summarize_teams.guardar_en_bd` | I7 |
+| ~~D1~~ | ~~**Los ids de reunión no son estables**~~ **resuelta**: `meetings.uid`, y el `id` también se conserva | `memoria.crear_reunion` | I2, I5, 3.8 |
+| ~~D2~~ | ~~**Rutas absolutas del host**~~ **resuelta**: `memoria.ruta_local` con `TEAMS_RAIZ_ORIGEN`/`TEAMS_RAIZ_LOCAL` | `summarize_teams.guardar_en_bd` | I7 |
 | D3 | **Los riesgos no tienen estado ni continuidad** | tabla `risks`: sin `estado`, sin arrastres, borrada en cascada | nada: **se asume**, redefiniendo la métrica (sección 0) |
 | D4 | **`cerrada_en` es la fecha de proceso, no la del cierre** | `memoria.insertar_acciones` usa `date('now')` | tiempo medio de cierre |
-| D5 | **No hay conexión de solo lectura** | `memoria.conectar()` siempre ejecuta el esquema y hace `commit` | I0 |
-| D6 | **No hay migraciones reales** | `_inicializar` solo hace `CREATE IF NOT EXISTS` + sube `user_version` | I6 (tabla `overrides`) |
+| ~~D5~~ | ~~**No hay conexión de solo lectura**~~ **resuelta**: `conectar(solo_lectura=True)` con `query_only` | `memoria.conectar` | I0 |
+| ~~D6~~ | ~~**No hay migraciones reales**~~ **resuelta**: `_migrar`, estrenada con la 1 → 2 | `memoria._inicializar` | I6 (tabla `overrides`) |
 | D7 | **No hay roster del equipo** | `personas` se puebla sola desde el LLM; `personas.activo` no lo usa nadie | "personas sin actualización" |
 | D8 | **`updates.bloqueos` es texto libre** | detectar recurrencia exige el LLM, y deja de ser un número determinista | "bloqueos recurrentes" |
 | D9 | **`duracion_seg` es NULL sin `.srt`** | sale del último `fin` de los segmentos | minutos/semana |
 
-**D1 es el más importante y el menos evidente.** Toda la interfaz cuelga de
-`/reuniones/{id}`: enlaces guardados, vistas filtradas compartidas por chat y,
-sobre todo, las citas que el chat genera para justificar sus respuestas. Si
-reprocesar una transcripción cambia el id, todo eso apunta a un 404 —y las
-citas del chat, que son lo que hace fiable la Fase 4, se convierten en enlaces
-rotos—. La solución más barata es una columna `uid` TEXT estable derivada del
-`transcript_path`, conservada al reemplazar la fila.
+**D1 era el más importante y el menos evidente** (ya resuelto, ver 9 bis). Toda
+la interfaz cuelga de la URL de una reunión: enlaces guardados, vistas
+filtradas compartidas por chat y, sobre todo, las citas que el chat genera para
+justificar sus respuestas. Si reprocesar una transcripción cambiara el
+identificador, todo eso apuntaría a un 404 —y las citas del chat, que son lo
+que hace fiable la Fase 4, se convertirían en enlaces rotos—.
 
 **D4, D7 y D8 no bloquean nada visual**, pero invalidan tres de las métricas de
 la sección 3.2. La decisión honesta es no mostrarlas hasta que el dato exista,
@@ -559,9 +613,9 @@ hermana de la Fase 2 en el plan del motor, no trabajo de interfaz.
 
 Cambios menores del mismo grupo:
 
-- **`journal_mode=WAL`** en `memoria.conectar()`, para que la API pueda leer
-  mientras `summarize_teams.py` escribe. Válido con un *bind mount* local; **no**
-  si `datos/` acabara en NFS.
+- ~~**`journal_mode=WAL`**~~ **hecho en D0**: la API puede leer mientras
+  `summarize_teams.py` escribe. Válido con un *bind mount* local; **no** si
+  `datos/` acabara en NFS.
 - **`date('now')` en SQLite es UTC**: en UTC+2, una acción cerrada a las 00:30
   se fecha el día anterior.
 - **`meetings.fecha` no tiene hora**: dos reuniones el mismo día no se pueden
@@ -580,4 +634,6 @@ Cambios menores del mismo grupo:
   3. La migración de esquema 1 → 2, sobre una copia de una BD real.
 
   Se escriben **con** cada fase, no al final: retroajustar tests a `memoria.py`
-  entero es un proyecto en sí mismo y no se hará.
+  entero es un proyecto en sí mismo y no se hará. **Estrenado en D0** con
+  `tests/test_memoria.py` (19 pruebas), que ya destapó un fallo de orden en la
+  migración antes de que llegara a una base real.

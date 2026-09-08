@@ -21,15 +21,24 @@ La ruta de la base se resuelve en este orden: argumento explicito >
 variable de entorno TEAMS_DB > `datos/meetings.db` junto al repo.
 """
 
+import hashlib
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
 
-ESQUEMA_VERSION = 1
+ESQUEMA_VERSION = 2
 
 RUTA_POR_DEFECTO = Path(__file__).resolve().parent / "datos" / "meetings.db"
 VARIABLE_ENTORNO = "TEAMS_DB"
+
+# Las rutas de audio y transcripcion se guardan absolutas y tal como las vio la
+# maquina que proceso la reunion. Quien lea la BD desde otro sitio (la API en
+# un contenedor, con `grabaciones/` montado en otro punto) traduce el prefijo
+# con estas dos variables en vez de reescribir la base.
+VARIABLE_RAIZ_ORIGEN = "TEAMS_RAIZ_ORIGEN"
+VARIABLE_RAIZ_LOCAL = "TEAMS_RAIZ_LOCAL"
 
 TIPOS_REUNION = ("daily", "workshop", "retro", "planning")
 
@@ -48,6 +57,7 @@ CONFIANZA_A_NUMERO = {"alta": 0.9, "media": 0.6, "baja": 0.3}
 _ESQUEMA = """
 CREATE TABLE IF NOT EXISTS meetings (
   id              INTEGER PRIMARY KEY,
+  uid             TEXT,
   fecha           TEXT NOT NULL,
   titulo          TEXT,
   tipo            TEXT NOT NULL DEFAULT 'daily',
@@ -116,6 +126,7 @@ CREATE TABLE IF NOT EXISTS segments (
   texto       TEXT NOT NULL
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_meetings_uid ON meetings(uid);
 CREATE INDEX IF NOT EXISTS idx_segments_meeting ON segments(meeting_id, idx);
 CREATE INDEX IF NOT EXISTS idx_actions_estado ON actions(estado);
 CREATE INDEX IF NOT EXISTS idx_meetings_fecha ON meetings(fecha);
@@ -153,22 +164,59 @@ def ruta_bd(explicita: Path | str | None = None) -> Path:
     return RUTA_POR_DEFECTO
 
 
-def conectar(ruta: Path | str | None = None) -> sqlite3.Connection:
-    """Abre (creando si hace falta) la BD y garantiza el esquema."""
+def conectar(
+    ruta: Path | str | None = None, solo_lectura: bool = False
+) -> sqlite3.Connection:
+    """Abre (creando si hace falta) la BD y garantiza el esquema.
+
+    Con `solo_lectura` la conexion rechaza cualquier escritura y **no** toca el
+    esquema: es la que debe usar todo lo que solo consulta (la API web), para
+    que un error de programacion no pueda corromper el historico.
+    """
     path = ruta_bd(ruta)
+    if solo_lectura:
+        if not path.exists():
+            raise FileNotFoundError(f"No existe la base de datos: {path}")
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        # Se usa `query_only` y no la URI `mode=ro` a proposito: con la base en
+        # modo WAL, una conexion abierta como `mode=ro` no puede crear el
+        # fichero `-shm` que SQLite necesita para leer, y falla justo cuando
+        # nadie mas esta escribiendo (el caso normal). `query_only` da la misma
+        # garantia -- cualquier INSERT/UPDATE/DELETE lanza excepcion -- sin ese
+        # problema.
+        conn.execute("PRAGMA query_only = ON")
+        return conn
+
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    _inicializar(conn)
+    # WAL permite que la API lea mientras el pipeline escribe. Es una propiedad
+    # persistente de la base: basta con fijarlo una vez, pero es idempotente.
+    # (No vale si `datos/` acabara en un sistema de ficheros en red.)
+    conn.execute("PRAGMA journal_mode = WAL")
+    try:
+        _inicializar(conn)
+    except Exception:
+        # Sin esto, un fallo de migracion deja el fichero abierto: en Windows
+        # nadie puede borrarlo ni moverlo despues.
+        conn.close()
+        raise
     return conn
 
 
-def _inicializar(conn: sqlite3.Connection) -> None:
-    """Crea el esquema si falta. Idempotente.
+def _columnas(conn: sqlite3.Connection, tabla: str) -> set[str]:
+    return {fila[1] for fila in conn.execute(f"PRAGMA table_info({tabla})")}
 
-    `PRAGMA user_version` marca la version del esquema para poder migrar mas
-    adelante sin adivinar; hoy solo existe la version 1.
+
+def _inicializar(conn: sqlite3.Connection) -> None:
+    """Crea el esquema si falta y migra el existente. Idempotente.
+
+    `PRAGMA user_version` marca la version del esquema. Las bases nuevas se
+    crean ya en la ultima con `_ESQUEMA`; las anteriores pasan por `_migrar`,
+    porque `CREATE TABLE IF NOT EXISTS` no anade columnas a una tabla que ya
+    existe.
     """
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version > ESQUEMA_VERSION:
@@ -176,10 +224,102 @@ def _inicializar(conn: sqlite3.Connection) -> None:
             f"La base de datos usa el esquema version {version}, superior al "
             f"que entiende este codigo ({ESQUEMA_VERSION}). Actualiza el repo."
         )
+    # Migrar antes de `_ESQUEMA`, no despues: el script crea el indice UNIQUE
+    # sobre `meetings.uid`, y en una base anterior esa columna todavia no
+    # existe.
+    if version < ESQUEMA_VERSION:
+        _migrar(conn, version)
     conn.executescript(_ESQUEMA)
     if version < ESQUEMA_VERSION:
         conn.execute(f"PRAGMA user_version = {ESQUEMA_VERSION}")
     conn.commit()
+
+
+def _migrar(conn: sqlite3.Connection, desde: int) -> None:
+    """Lleva una base existente hasta `ESQUEMA_VERSION`.
+
+    `desde` es 0 en una base recien creada (donde `_ESQUEMA` ya lo ha dejado
+    todo hecho) y la version anterior en una que venia de antes.
+    """
+    if desde and desde < 2:
+        # v1 -> v2: `meetings.uid`, identidad estable de una reunion.
+        if "uid" not in _columnas(conn, "meetings"):
+            conn.execute("ALTER TABLE meetings ADD COLUMN uid TEXT")
+        for fila in conn.execute(
+            "SELECT id, transcript_path FROM meetings WHERE uid IS NULL"
+        ).fetchall():
+            conn.execute(
+                "UPDATE meetings SET uid = ? WHERE id = ?",
+                (_uid_disponible(conn, fila["transcript_path"]), fila["id"]),
+            )
+        # El indice UNIQUE lo crea `_ESQUEMA`, justo despues de esto.
+
+
+# --------------------------------------------------------------------------
+# Rutas
+# --------------------------------------------------------------------------
+
+
+def ruta_local(ruta: str | None) -> Path | None:
+    """Traduce una ruta guardada en la BD a una valida en esta maquina.
+
+    `meetings.audio_path` y `transcript_path` son rutas absolutas de la maquina
+    que proceso la reunion. Quien lea la base desde otro sitio -- tipicamente la
+    API en un contenedor, con `grabaciones/` montado en otro punto -- define
+    TEAMS_RAIZ_ORIGEN y TEAMS_RAIZ_LOCAL y esta funcion sustituye el prefijo.
+    Sin esas variables devuelve la ruta tal cual.
+    """
+    if not ruta:
+        return None
+    origen = os.environ.get(VARIABLE_RAIZ_ORIGEN)
+    local = os.environ.get(VARIABLE_RAIZ_LOCAL)
+    if not origen or not local:
+        return Path(ruta)
+    # Comparacion con separadores normalizados: la ruta pudo escribirse en
+    # Windows y leerse en Linux.
+    plana = ruta.replace("\\", "/")
+    prefijo = origen.replace("\\", "/").rstrip("/")
+    if plana.lower().startswith(prefijo.lower()):
+        resto = plana[len(prefijo) :].lstrip("/")
+        return Path(local) / resto if resto else Path(local)
+    return Path(ruta)
+
+
+_UID_INVALIDO = re.compile(r"[^a-z0-9_-]+")
+
+
+def uid_transcripcion(transcript_path: Path | str | None) -> str | None:
+    """Identidad estable de una reunion, derivada del nombre de su transcripcion.
+
+    Se usa en las URLs de la interfaz y como ancla de las correcciones
+    manuales, asi que tiene que sobrevivir a un reprocesado: `meetings.id` no
+    sirve porque reprocesar borra e inserta la fila.
+
+    Del nombre y no de la ruta completa a proposito: mover `grabaciones/` de
+    sitio, o procesar la misma transcripcion en otra maquina, no deberia
+    cambiar la identidad de la reunion.
+    """
+    if not transcript_path:
+        return None
+    base = _UID_INVALIDO.sub("-", Path(transcript_path).stem.lower()).strip("-")
+    return base[:60] if base else "reunion"
+
+
+def _uid_disponible(conn: sqlite3.Connection, transcript_path: str | None) -> str | None:
+    """`uid_transcripcion` evitando chocar con una reunion ya registrada.
+
+    Dos transcripciones distintas pueden tener el mismo nombre en carpetas
+    distintas; el indice UNIQUE rechazaria la segunda. En ese caso se desempata
+    con un resumen corto de la ruta completa, que si es unica.
+    """
+    base = uid_transcripcion(transcript_path)
+    if base is None:
+        return None
+    fila = conn.execute("SELECT id FROM meetings WHERE uid = ?", (base,)).fetchone()
+    if not fila:
+        return base
+    sufijo = hashlib.sha1(str(transcript_path).encode("utf-8")).hexdigest()[:6]
+    return f"{base[:53]}-{sufijo}"
 
 
 # --------------------------------------------------------------------------
@@ -272,27 +412,45 @@ def crear_reunion(
     borra la reunion anterior en vez de duplicarla: el pipeline se ejecuta a
     mano y se repite a menudo mientras se afinan prompts. El borrado arrastra
     en cascada segmentos, updates, riesgos y acciones originadas en ella.
+
+    **La identidad de la reunion sobrevive al reemplazo**: la fila nueva
+    conserva el `uid` y tambien el `id` de la anterior. Sin eso, cada
+    reprocesado dejaria invalidos los enlaces guardados y las citas que la
+    interfaz genera para justificar sus respuestas.
     """
     if tipo not in TIPOS_REUNION:
         raise ValueError(f"Tipo de reunion desconocido: {tipo!r}")
 
+    id_previo = None
+    uid = None
     if reemplazar and transcript_path:
         for antigua in conn.execute(
-            "SELECT id FROM meetings WHERE transcript_path = ?", (transcript_path,)
+            "SELECT id, uid FROM meetings WHERE transcript_path = ? ORDER BY id",
+            (transcript_path,),
         ).fetchall():
             _deshacer_arrastres(conn, antigua["id"])
+            id_previo = antigua["id"]
+            uid = antigua["uid"] or uid
         conn.execute(
             "DELETE FROM meetings WHERE transcript_path = ?", (transcript_path,)
         )
 
+    if uid is None:
+        uid = _uid_disponible(conn, transcript_path)
+
+    # `id_previo` a None deja que SQLite asigne el siguiente id; con valor,
+    # reutiliza el de la fila que se acaba de borrar.
     cur = conn.execute(
         """
         INSERT INTO meetings (
-            fecha, titulo, tipo, audio_path, transcript_path, duracion_seg,
-            modelo_whisper, modelo_llm, resumen, datos_json, creado_en
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            id, uid, fecha, titulo, tipo, audio_path, transcript_path,
+            duracion_seg, modelo_whisper, modelo_llm, resumen, datos_json,
+            creado_en
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         """,
         (
+            id_previo,
+            uid,
             fecha,
             titulo,
             tipo,
@@ -499,6 +657,14 @@ def id_reunion_por_transcripcion(
         (transcript_path,),
     ).fetchone()
     return fila["id"] if fila else None
+
+
+def reunion_por_uid(conn: sqlite3.Connection, uid: str) -> sqlite3.Row | None:
+    """La reunion con ese `uid`, la identidad estable entre reprocesados.
+
+    Es la consulta que resuelve una URL de la interfaz y una cita del chat.
+    """
+    return conn.execute("SELECT * FROM meetings WHERE uid = ?", (uid,)).fetchone()
 
 
 # `excluir_meeting_id` no se limita a filtrar: simula el efecto de

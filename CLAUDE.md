@@ -39,7 +39,13 @@ Transcribir:
 .\.venv\Scripts\python.exe transcribe_teams.py archivo.wav --model medium --device cuda --language auto
 ```
 
-No hay suite de tests ni linter en el repo; verificar cambios ejecutando los scripts manualmente contra un `.wav` de prueba.
+Tests (solo `memoria.py` de momento; no hay linter):
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+Son `unittest` de la stdlib, sin pytest ni dependencias: tienen que poder ejecutarse en el servidor offline. Lo que no cubren —la transcripción y la llamada al LLM— se sigue verificando ejecutando los scripts a mano contra un `.wav` de prueba.
 
 ## Arquitectura y puntos a tener en cuenta
 
@@ -54,7 +60,7 @@ No hay suite de tests ni linter en el repo; verificar cambios ejecutando los scr
 - **Resumen con LLM local** (`summarize_teams.py`): llama al endpoint `/chat/completions` de un proxy LiteLLM en `http://localhost:4000/v1` (configurable con `--base-url`) usando solo `urllib` de la stdlib, sin añadir dependencias. Requiere `--api-key`/`LITELLM_API_KEY`. El nombre de modelo (`--model`, por defecto `qwen3.6-35b-a3b`) debe coincidir con un `model_name` configurado en ese LiteLLM; para listar los disponibles: `curl http://localhost:4000/v1/models -H "Authorization: Bearer <key>"`.
 - **El LLM devuelve JSON, no Markdown** (`summarize_teams.py`, Fase 1 del plan): se pide un objeto JSON con esquema fijo (`temperature` 0.1) y el `.md` se **renderiza en Python** desde ese JSON (`renderizar_markdown`), de modo que una sola llamada alimenta el fichero y la BD. `extraer_json` acepta el JSON envuelto en bloque de código o rodeado de prosa; si falla, hay **un** reintento devolviéndole al modelo su propia respuesta, y si vuelve a fallar se guarda la respuesta cruda como `.md`, se avisa por stderr y se sale con código 2 sin tocar la BD. `normalizar()` tolera claves ausentes o del tipo equivocado, pero nada sin validar entra en SQLite.
 - **Tipos de reunión** (`--tipo {daily,workshop,retro,planning}`, por defecto `daily`): diccionario `TIPOS` en `summarize_teams.py`. Cada tipo cambia el enfoque del prompt y aporta **una clave JSON propia** (`retro`, `planning`, `workshop`) que se renderiza como secciones extra; el resto del esquema es común, para que la BD y los futuros informes no tengan que saber de tipos. `daily` no añade clave: es el comportamiento de siempre.
-- **Almacén SQLite** (`memoria.py`): esquema idempotente (`CREATE TABLE IF NOT EXISTS` + `PRAGMA user_version`, hoy versión 1). Ruta: `--db` > variable `TEAMS_DB` > `datos/meetings.db`. `segments_fts` es una tabla FTS5 de *contenido externo*, sincronizada con tres triggers (insert/delete/update); si se toca `segments` por otra vía hay que mantenerlos. Tokenizador `unicode61 remove_diacritics 2`, así que la búsqueda ignora acentos pero **no** hace stemming.
+- **Almacén SQLite** (`memoria.py`): esquema idempotente (`CREATE TABLE IF NOT EXISTS` + `PRAGMA user_version`, hoy versión 2). Ruta: `--db` > variable `TEAMS_DB` > `datos/meetings.db`. `segments_fts` es una tabla FTS5 de *contenido externo*, sincronizada con tres triggers (insert/delete/update); si se toca `segments` por otra vía hay que mantenerlos. Tokenizador `unicode61 remove_diacritics 2`, así que la búsqueda ignora acentos pero **no** hace stemming.
 - **Arrastres entre reuniones** (Fase 2): antes de llamar al LLM,
   `cargar_acciones_abiertas` lee de la BD las acciones sin cerrar de las
   últimas N reuniones (`--arrastres N`, por defecto 5; `--sin-arrastres` lo
@@ -74,6 +80,12 @@ No hay suite de tests ni linter en el repo; verificar cambios ejecutando los scr
   que tenían **antes** — lo mismo que hará `_deshacer_arrastres` al borrarla
   después. Sin eso, una acción que la pasada anterior dio por completada no
   volvería a ofrecerse al modelo y el reproceso no sería idempotente.
+- **`meetings.uid` es la identidad estable de una reunión**, y `meetings.id` no lo es: reprocesar borra e inserta la fila. `uid_transcripcion` lo deriva del **nombre** del `.txt` (no de la ruta, para que mover `grabaciones/` no cambie la identidad), normalizado a `[a-z0-9_-]`; `_uid_disponible` desempata con un hash corto de la ruta si dos transcripciones distintas comparten nombre. `crear_reunion` conserva al reemplazar **tanto el `uid` como el `id` anterior** (lo reinserta explícitamente), porque los enlaces de la futura interfaz y las citas del chat cuelgan de ese identificador. Resolver un `uid`: `reunion_por_uid`.
+- **`conectar(solo_lectura=True)`** para todo lo que solo consulta (la API web): no toca el esquema y activa `PRAGMA query_only`. **No** usa la URI `mode=ro` a propósito: con la base en WAL, una conexión `mode=ro` no puede crear el fichero `-shm` que SQLite necesita para leer y falla justo cuando nadie más está escribiendo, que es el caso normal.
+- **WAL activado** en `conectar()`, para que la API pueda leer mientras el pipeline escribe. Es una propiedad persistente de la base. No sirve si `datos/` acabara en un sistema de ficheros en red.
+- **Migraciones reales** (`_migrar`): `CREATE TABLE IF NOT EXISTS` no añade columnas a una tabla que ya existe, así que las bases anteriores pasan por `ALTER TABLE`. Se migra **antes** de ejecutar `_ESQUEMA`, porque el script crea el índice UNIQUE sobre `meetings.uid` y esa columna aún no existe en una base v1.
+- **Rutas entre máquinas** (`ruta_local`): `audio_path` y `transcript_path` se guardan absolutas y tal como las vio la máquina que procesó la reunión. Quien lea la base desde otro sitio (la API en un contenedor) define `TEAMS_RAIZ_ORIGEN`/`TEAMS_RAIZ_LOCAL` y se sustituye el prefijo, comparando con separadores normalizados porque la ruta pudo escribirse en Windows y leerse en Linux. Sin esas variables, la ruta se devuelve tal cual.
+- **Tests**: `python -m unittest discover -s tests -v`. Solo stdlib, sin pytest, para que funcionen en el servidor offline sin instalar nada. Cubren la identidad estable, la conexión de solo lectura, WAL, el remapeo de rutas, la migración 1→2 y —como red de seguridad— la idempotencia de los arrastres de la Fase 2.
 - **Reprocesar una reunión la sustituye**: `crear_reunion(..., reemplazar=True)` borra la fila anterior con el mismo `transcript_path` (cascada a segmentos, updates, riesgos y acciones nacidas en ella). Antes llama a `_deshacer_arrastres`, que devuelve a su origen las acciones *ajenas* que esa pasada actualizó: sin eso, la FK `actions.meeting_id_ultima` (sin `ON DELETE`) impediría el borrado y las menciones quedarían infladas. El estado previo no se guarda, así que las cerradas por esa reunión vuelven a `abierta`.
 - **Los segmentos entran por `summarize_teams.py`, no por `transcribe_teams.py`**: se leen del `.srt` hermano (mismo nombre, otra extensión) porque el `.txt` no lleva marcas de tiempo; si no existe el `.srt` se cae al `.txt` con `inicio`/`fin` a NULL. Decisión deliberada para no tocar la parte frágil del pipeline (Whisper/pyannote/GPU) en la Fase 1.
 - **Nombres genéricos no crean personas**: `obtener_o_crear_persona` devuelve `None` para `SPEAKER_XX`, "no identificado" y similares; las filas quedan con `persona_id` NULL en vez de inventar gente. El emparejamiento es por nombre sin distinguir mayúsculas y por la lista de alias (`personas.alias`, JSON).
