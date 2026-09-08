@@ -1,6 +1,7 @@
 # Plan de mejoras: de "transcriptor" a "memoria del equipo"
 
-Redactado el 2026-09-07. **Fase 0 implementada**; el resto es propuesta.
+Redactado el 2026-09-07. **Fases 0 y 1 implementadas** (Fase 1 el
+2026-09-08); el resto es propuesta.
 
 ## 0. Decisiones tomadas (2026-09-07)
 
@@ -165,7 +166,7 @@ sigue sin confirmar (GCS4-1 / 4.1, SOAM).
 
 ---
 
-## Fase 1 — Salida estructurada y almacén SQLite
+## Fase 1 — Salida estructurada y almacén SQLite — IMPLEMENTADA
 
 **Resuelve:** P3, y es la base de todas las fases siguientes.
 **Esfuerzo:** medio. **Riesgo:** bajo (no toca la parte frágil del pipeline).
@@ -305,6 +306,41 @@ sección nueva de **Arrastres**.
 **Criterio de aceptación:** procesar la transcripción del 2026-09-07 y obtener
 un `.md` equivalente al actual *y* filas coherentes en `meetings`, `updates`,
 `actions` y `risks`.
+
+### Resultado (2026-09-08)
+
+Ficheros: `memoria.py` nuevo; `summarize_teams.py` reescrito en su parte de
+prompt, salida y persistencia. `transcribe_teams.py` **sin tocar**.
+
+Verificado de extremo a extremo contra un servidor que imita
+`/chat/completions` (no hacía falta GPU ni LiteLLM para probar el pipeline):
+sobre la transcripción real del 7-sep se obtiene el `.md` con las secciones de
+siempre y 326 segmentos, 2 updates, 2 acciones y 1 riesgo en la BD, con FTS5
+sincronizada (326 filas) y búsqueda insensible a acentos. Probados también el
+JSON envuelto en bloque de código, un tipo distinto (`retro`, con sus tres
+secciones extra), el reproceso de la misma transcripción (sustituye, no
+duplica) y el caso en que el modelo no devuelve JSON (guarda la respuesta
+cruda, sale con código 2, no toca la BD).
+
+Desviaciones respecto a lo planificado, todas conscientes:
+
+1. **Dos columnas más en `meetings`**: `resumen` (texto del resumen, para no
+   tener que abrir el JSON en las consultas) y `datos_json` (el objeto
+   completo del LLM). Esto último salva la sección específica de cada tipo
+   (`retro`, `planning`, `workshop`), que no tiene tabla propia: sin ella se
+   perdería al salir del `.md`.
+2. **Los segmentos los inserta `summarize_teams.py`**, leyéndolos del `.srt`
+   hermano (el `.txt` no tiene marcas de tiempo), en vez de volcarlos desde
+   `transcribe_teams.py`. Mantiene la Fase 1 fuera de la parte frágil del
+   pipeline; si en la Fase 3 hay que tocar `transcribe_teams.py` de todos
+   modos, se puede mover allí.
+3. **`--importar`** (sección 5) no está hecho: solo hay una reunión anterior en
+   `grabaciones/`, y reprocesarla con el script normal sale más barato que
+   escribir el importador.
+4. La **infraestructura de arrastres ya existe** en `memoria.py`
+   (`acciones_abiertas`, `aplicar_arrastres`) y la clave `arrastres` viaja en
+   el JSON y se renderiza, pero todavía no se inyectan las acciones abiertas
+   en el prompt: eso es la Fase 2, y es lo único que falta para cerrarla.
 
 ---
 
@@ -458,7 +494,7 @@ reuniones juntas no caben en la ventana del modelo local. Se necesita:
 | Orden | Fase | Esfuerzo | Riesgo | Desbloquea |
 |---|---|---|---|---|
 | ~~1~~ | ~~Fase 0 — Glosario~~ **hecha** | Bajo | Nulo | Calidad de todo lo demás |
-| 2 | Fase 1 — JSON + SQLite | Medio | Bajo | Fases 2, 4, 5 |
+| ~~2~~ | ~~Fase 1 — JSON + SQLite~~ **hecha** | Medio | Bajo | Fases 2, 4, 5 |
 | 3 | Fase 2 — Arrastres | Bajo | Bajo | El valor de gestión |
 | 4 | Fase 4 — `ask_teams.py` | Medio | Bajo | Consulta del histórico |
 | 5 | Fase 5 — `report_teams.py` | Bajo | Nulo | Informes |

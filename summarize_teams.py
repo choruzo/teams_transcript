@@ -3,12 +3,13 @@ summarize_teams.py
 
 Genera un resumen de una transcripcion (el .txt generado por
 transcribe_teams.py, con o sin diarizacion) usando un LLM local servido a
-traves de LiteLLM (API compatible con OpenAI).
+traves de LiteLLM (API compatible con OpenAI), y lo guarda tanto en Markdown
+como en el almacen SQLite del historico (`datos/meetings.db`, ver memoria.py).
 
 Uso:
-    python summarize_teams.py grabaciones\20260907_090437_mixed.txt
-    python summarize_teams.py archivo.txt --model qwen3.8-27b
-    python summarize_teams.py archivo.txt --base-url http://localhost:4000/v1
+    python summarize_teams.py grabaciones\\20260907_090437_mixed.txt
+    python summarize_teams.py archivo.txt --tipo retro
+    python summarize_teams.py archivo.txt --model qwen3.8-27b --sin-bd
 
 Genera junto a la transcripcion:
   <nombre>_resumen.md
@@ -16,19 +17,28 @@ Genera junto a la transcripcion:
 Notas:
   - Requiere la API key de LiteLLM en la variable de entorno LITELLM_API_KEY
     (o pasarla con --api-key).
+  - El LLM devuelve JSON estructurado; el Markdown se renderiza en Python a
+    partir de ese JSON, de modo que la misma llamada alimenta el .md y la BD.
+    Si el modelo no consigue devolver JSON valido (dos intentos), se guarda su
+    respuesta cruda como .md y no se toca la BD: nunca se pierde el trabajo.
+  - Con --sin-bd se reproduce el comportamiento anterior de solo Markdown.
   - Si la transcripcion viene de --diarize, los hablantes apareceran como
-    SPEAKER_00, SPEAKER_01, etc. (etiquetas genericas, sin nombres reales).
+    SPEAKER_00, SPEAKER_01, etc. (etiquetas genericas, sin nombres reales) y
+    el modelo intenta mapearlos a personas por contexto.
 """
 
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 import glosario as glosario_mod
+import memoria
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -36,11 +46,15 @@ if hasattr(sys.stdout, "reconfigure"):
 DEFAULT_MODEL = "qwen3.6-35b-a3b"
 DEFAULT_BASE_URL = "http://localhost:4000/v1"
 
-SYSTEM_PROMPT = (
-    "Eres un asistente que analiza transcripciones de reuniones diarias "
-    "(dailys) de un equipo de desarrollo de software, generadas por "
-    "transcripcion automatica (Whisper) y, opcionalmente, diarizacion de "
-    "hablantes (pyannote). Ten en cuenta sus limitaciones:\n\n"
+# La llamada estructurada quiere obediencia, no creatividad.
+TEMPERATURA_JSON = 0.1
+
+
+BASE_PROMPT = (
+    "Eres un asistente que analiza transcripciones de reuniones de un equipo "
+    "de desarrollo de software, generadas por transcripcion automatica "
+    "(Whisper) y, opcionalmente, diarizacion de hablantes (pyannote). Ten en "
+    "cuenta sus limitaciones:\n\n"
     "- Los errores de transcripcion son habituales: nombres propios, siglas "
     "o terminos tecnicos mal transcritos, y a veces frases sueltas repetidas "
     "sin sentido (artefactos del reconocimiento de voz, especialmente al "
@@ -51,31 +65,104 @@ SYSTEM_PROMPT = (
     "puede aparecer bajo dos etiquetas distintas si la diarizacion se "
     "equivoco, y una etiqueta puede mezclar a mas de una persona.\n"
     "- No inventes informacion que no este en la transcripcion. Si algo no "
-    "esta claro (una tarea, un nombre, una fecha), dilo explicitamente en "
-    "vez de rellenar el hueco de forma plausible.\n\n"
-    "Responde siempre en espanol y en formato Markdown, con esta estructura:\n\n"
-    "## Mapeo de hablantes\n"
-    "Para cada etiqueta SPEAKER_XX que aparezca, una linea "
-    "`SPEAKER_XX -> <nombre inferido o 'no identificado'>` con el nivel de "
-    "confianza (alta/media/baja) segun cuanto contexto haya para inferirlo. "
-    "Omite esta seccion por completo si la transcripcion no tiene etiquetas "
-    "de hablante.\n\n"
-    "## Resumen\n"
-    "2-4 frases con el estado general de la reunion.\n\n"
-    "## Por persona\n"
-    "- **<nombre o etiqueta>**: en que esta trabajando, bloqueos, proximos "
-    "pasos. Se conciso: una o dos frases por persona, sin repetir literalmente "
-    "frases de la transcripcion.\n\n"
-    "## Acciones y pendientes\n"
-    "- Tareas o compromisos concretos mencionados, con quien los asume si se "
-    "sabe. Solo incluye compromisos reales, no comentarios genericos tipo "
-    "'vale, genial'.\n\n"
-    "## Bloqueos / riesgos\n"
-    "- Problemas o riesgos mencionados que requieran seguimiento.\n\n"
-    "Si alguna seccion no tiene contenido relevante, indica '(sin novedades)' "
-    "en vez de omitirla (salvo el mapeo de hablantes, que se omite entero si "
-    "no aplica)."
+    "esta claro (una tarea, un nombre, una fecha), dilo explicitamente en vez "
+    "de rellenar el hueco de forma plausible.\n\n"
+    "Escribe siempre en espanol."
 )
+
+
+ESQUEMA_COMUN = """
+Campos comunes del objeto JSON:
+
+  "resumen": string. 2-4 frases con el estado general de la reunion.
+  "hablantes": lista de objetos {"etiqueta": "SPEAKER_XX", "nombre": "<nombre
+      inferido o 'no identificado'>", "confianza": "alta"|"media"|"baja"}.
+      Una entrada por cada etiqueta SPEAKER_XX que aparezca en la
+      transcripcion. Lista vacia si la transcripcion no tiene etiquetas.
+  "por_persona": lista de objetos {"persona": "<nombre o etiqueta>",
+      "trabajo": "...", "bloqueos": "...", "proximos_pasos": "..."}. Se
+      conciso: una o dos frases por campo, sin copiar literalmente la
+      transcripcion. Usa "" en los campos sin contenido.
+  "acciones": lista de objetos {"persona": "<nombre o etiqueta o null>",
+      "descripcion": "<compromiso concreto>", "estado":
+      "abierta"|"en_progreso"|"completada"|"bloqueada"}. Solo compromisos
+      reales, no comentarios genericos tipo "vale, genial".
+  "arrastres": lista de objetos {"action_id": <numero>, "estado":
+      "completada"|"en_progreso"|"bloqueada"|"sin_mencion", "comentario":
+      "..."}. Dejala vacia salvo que se te haya dado una lista de acciones
+      abiertas anteriores con sus identificadores.
+  "riesgos": lista de objetos {"descripcion": "...", "area": "<componente o
+      null>", "severidad": "alta"|"media"|"baja"}.
+"""
+
+
+# Cada tipo de reunion aporta su seccion especifica; el resto del esquema es
+# comun para que la BD y los informes no tengan que saber de tipos.
+TIPOS = {
+    "daily": {
+        "contexto": "una reunion diaria de seguimiento (daily)",
+        "enfoque": (
+            "Centrate en el estado de cada persona: en que trabaja, que la "
+            "bloquea y que hara a continuacion, y en los compromisos "
+            "concretos que se adquieren."
+        ),
+        "clave": None,
+        "esquema": "",
+        "secciones": (),
+    },
+    "retro": {
+        "contexto": "una retrospectiva de equipo",
+        "enfoque": (
+            "Centrate en la valoracion del periodo: que ha funcionado, que no, "
+            "y que acuerdos de mejora se toman. Las acciones de mejora "
+            "acordadas van tambien en \"acciones\"."
+        ),
+        "clave": "retro",
+        "esquema": (
+            '  "retro": {"bien": ["..."], "mal": ["..."], "mejoras": ["..."]}\n'
+        ),
+        "secciones": (
+            ("bien", "Que fue bien"),
+            ("mal", "Que no fue bien"),
+            ("mejoras", "Acciones de mejora acordadas"),
+        ),
+    },
+    "planning": {
+        "contexto": "una reunion de planificacion (planning)",
+        "enfoque": (
+            "Centrate en el alcance que el equipo se compromete a abordar, las "
+            "estimaciones que se mencionan y las dudas que quedan sin "
+            "resolver."
+        ),
+        "clave": "planning",
+        "esquema": (
+            '  "planning": {"alcance": ["..."], "estimaciones": ["..."], '
+            '"dudas": ["..."]}\n'
+        ),
+        "secciones": (
+            ("alcance", "Alcance comprometido"),
+            ("estimaciones", "Estimaciones"),
+            ("dudas", "Dudas abiertas"),
+        ),
+    },
+    "workshop": {
+        "contexto": "un workshop o sesion de trabajo tecnica",
+        "enfoque": (
+            "Centrate en los temas tratados, las decisiones tomadas (con su "
+            "motivo, si se dice) y las preguntas que quedan sin resolver."
+        ),
+        "clave": "workshop",
+        "esquema": (
+            '  "workshop": {"temas": ["..."], "decisiones": ["..."], '
+            '"preguntas": ["..."]}\n'
+        ),
+        "secciones": (
+            ("temas", "Temas tratados"),
+            ("decisiones", "Decisiones"),
+            ("preguntas", "Preguntas sin resolver"),
+        ),
+    },
+}
 
 
 GLOSARIO_PROMPT = (
@@ -89,35 +176,58 @@ GLOSARIO_PROMPT = (
 )
 
 
-def call_litellm(
-    base_url: str,
-    api_key: str,
-    model: str,
-    transcript: str,
-    attendees: str | None,
-    glosario: str | None = None,
-) -> str:
-    system_content = SYSTEM_PROMPT
-    if glosario:
-        system_content += GLOSARIO_PROMPT + glosario
+# --------------------------------------------------------------------------
+# Prompts
+# --------------------------------------------------------------------------
 
-    user_content = ""
+
+def construir_system_prompt(tipo: str, glosario: str | None) -> str:
+    conf = TIPOS[tipo]
+    partes = [
+        BASE_PROMPT,
+        f"\n\nLa transcripcion corresponde a {conf['contexto']}. {conf['enfoque']}",
+        "\n\nResponde UNICAMENTE con un objeto JSON valido, sin texto antes ni "
+        "despues y sin bloque de codigo. Usa exactamente estas claves; no "
+        "anadas otras.\n",
+        ESQUEMA_COMUN,
+    ]
+    if conf["esquema"]:
+        partes.append("\nCampo especifico de este tipo de reunion:\n\n")
+        partes.append(conf["esquema"])
+    partes.append(
+        "\nSi una lista no tiene contenido relevante, devuelvela vacia; no "
+        "inventes elementos para rellenar."
+    )
+    if glosario:
+        partes.append(GLOSARIO_PROMPT + glosario)
+    return "".join(partes)
+
+
+def construir_user_prompt(transcript: str, attendees: str | None) -> str:
+    partes = []
     if attendees:
-        user_content += (
+        partes.append(
             f"Participantes habituales de esta reunion (puede que no esten "
             f"todos presentes hoy, usalo solo como pista para el mapeo de "
             f"hablantes): {attendees}\n\n"
         )
-    user_content += f"Transcripcion de la reunion:\n\n{transcript}"
+    partes.append(f"Transcripcion de la reunion:\n\n{transcript}")
+    return "".join(partes)
 
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_content},
-        ],
-        "temperature": 0.3,
-    }
+
+# --------------------------------------------------------------------------
+# Llamada al LLM
+# --------------------------------------------------------------------------
+
+
+def call_litellm(
+    base_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict],
+    temperature: float = 0.3,
+) -> str:
+    payload = {"model": model, "messages": messages, "temperature": temperature}
     request = urllib.request.Request(
         url=f"{base_url.rstrip('/')}/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
@@ -141,11 +251,462 @@ def call_litellm(
     return body["choices"][0]["message"]["content"]
 
 
+_BLOQUE_CODIGO = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+
+
+def extraer_json(respuesta: str) -> dict:
+    """Interpreta la respuesta del modelo como objeto JSON.
+
+    Los modelos locales tienden a envolver el JSON en un bloque de codigo o a
+    acompanarlo de una frase; se acepta ambas cosas antes de darlo por malo.
+    Lanza ValueError si no hay JSON utilizable.
+    """
+    texto = respuesta.strip()
+
+    candidatos = [m.group(1).strip() for m in _BLOQUE_CODIGO.finditer(texto)]
+    candidatos.append(texto)
+    inicio, fin = texto.find("{"), texto.rfind("}")
+    if inicio != -1 and fin > inicio:
+        candidatos.append(texto[inicio : fin + 1])
+
+    for candidato in candidatos:
+        if not candidato:
+            continue
+        try:
+            datos = json.loads(candidato)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(datos, dict):
+            return datos
+
+    raise ValueError("la respuesta no contiene un objeto JSON valido")
+
+
+def _lista_de_dicts(datos: dict, clave: str) -> list[dict]:
+    valor = datos.get(clave)
+    if not isinstance(valor, list):
+        return []
+    return [item for item in valor if isinstance(item, dict)]
+
+
+def _lista_de_textos(valor) -> list[str]:
+    if not isinstance(valor, list):
+        return []
+    return [str(item).strip() for item in valor if str(item).strip()]
+
+
+def normalizar(datos: dict, tipo: str) -> dict:
+    """Valida y normaliza el JSON del modelo antes de usarlo.
+
+    Se toleran claves ausentes o con el tipo equivocado (se sustituyen por
+    vacio); lo que no se tolera es meter en la BD algo que no sea lo esperado.
+    """
+    limpio = {
+        "resumen": str(datos.get("resumen") or "").strip(),
+        "hablantes": [],
+        "por_persona": [],
+        "acciones": [],
+        "arrastres": [],
+        "riesgos": [],
+    }
+
+    for hablante in _lista_de_dicts(datos, "hablantes"):
+        etiqueta = str(hablante.get("etiqueta") or "").strip()
+        if not etiqueta:
+            continue
+        limpio["hablantes"].append(
+            {
+                "etiqueta": etiqueta,
+                "nombre": str(hablante.get("nombre") or "").strip() or "no identificado",
+                "confianza": str(hablante.get("confianza") or "").strip().lower(),
+            }
+        )
+
+    for upd in _lista_de_dicts(datos, "por_persona"):
+        persona = str(upd.get("persona") or "").strip()
+        if not persona:
+            continue
+        limpio["por_persona"].append(
+            {
+                "persona": persona,
+                "trabajo": str(upd.get("trabajo") or "").strip(),
+                "bloqueos": str(upd.get("bloqueos") or "").strip(),
+                "proximos_pasos": str(upd.get("proximos_pasos") or "").strip(),
+            }
+        )
+
+    for accion in _lista_de_dicts(datos, "acciones"):
+        descripcion = str(accion.get("descripcion") or "").strip()
+        if not descripcion:
+            continue
+        estado = str(accion.get("estado") or "abierta").strip().lower()
+        if estado not in memoria.ESTADOS_ACCION:
+            estado = "abierta"
+        limpio["acciones"].append(
+            {
+                "persona": str(accion.get("persona") or "").strip(),
+                "descripcion": descripcion,
+                "estado": estado,
+            }
+        )
+
+    for arrastre in _lista_de_dicts(datos, "arrastres"):
+        try:
+            action_id = int(arrastre.get("action_id"))
+        except (TypeError, ValueError):
+            continue
+        limpio["arrastres"].append(
+            {
+                "action_id": action_id,
+                "estado": str(arrastre.get("estado") or "").strip().lower(),
+                "comentario": str(arrastre.get("comentario") or "").strip(),
+            }
+        )
+
+    for riesgo in _lista_de_dicts(datos, "riesgos"):
+        descripcion = str(riesgo.get("descripcion") or "").strip()
+        if not descripcion:
+            continue
+        limpio["riesgos"].append(
+            {
+                "descripcion": descripcion,
+                "area": str(riesgo.get("area") or "").strip(),
+                "severidad": str(riesgo.get("severidad") or "").strip().lower(),
+            }
+        )
+
+    clave = TIPOS[tipo]["clave"]
+    if clave:
+        bloque = datos.get(clave)
+        bloque = bloque if isinstance(bloque, dict) else {}
+        limpio[clave] = {
+            campo: _lista_de_textos(bloque.get(campo))
+            for campo, _ in TIPOS[tipo]["secciones"]
+        }
+
+    return limpio
+
+
+def pedir_resumen(
+    base_url: str,
+    api_key: str,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+) -> tuple[dict | None, str]:
+    """Pide el resumen estructurado. Devuelve (json_normalizado|None, crudo).
+
+    Un unico reintento si el JSON no es valido: se le devuelve al modelo su
+    propia respuesta y el error, que es mas efectivo que repetir la peticion
+    entera. Si tambien falla, se devuelve None y el texto crudo para que el
+    llamante lo guarde tal cual.
+    """
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    respuesta = call_litellm(base_url, api_key, model, messages, TEMPERATURA_JSON)
+    try:
+        return extraer_json(respuesta), respuesta
+    except ValueError as exc:
+        print(
+            f"Aviso: {exc}. Reintentando pidiendo solo el JSON...",
+            file=sys.stderr,
+        )
+
+    messages.append({"role": "assistant", "content": respuesta})
+    messages.append(
+        {
+            "role": "user",
+            "content": (
+                "Tu respuesta anterior no era un objeto JSON valido. Devuelve "
+                "unicamente el objeto JSON corregido, con las claves indicadas, "
+                "sin explicaciones ni bloque de codigo."
+            ),
+        }
+    )
+    reintento = call_litellm(base_url, api_key, model, messages, TEMPERATURA_JSON)
+    try:
+        return extraer_json(reintento), reintento
+    except ValueError:
+        return None, reintento
+
+
+# --------------------------------------------------------------------------
+# Renderizado del Markdown
+# --------------------------------------------------------------------------
+
+
+def _vinetas(items: list[str]) -> list[str]:
+    return [f"- {item}" for item in items] if items else ["(sin novedades)"]
+
+
+def renderizar_markdown(
+    datos: dict, tipo: str, fecha: str, titulo: str | None
+) -> str:
+    lineas: list[str] = []
+    encabezado = titulo or f"Resumen de la reunion ({tipo})"
+    lineas.append(f"# {encabezado}")
+    lineas.append("")
+    lineas.append(f"*Fecha: {fecha} · Tipo: {tipo}*")
+    lineas.append("")
+
+    if datos["hablantes"]:
+        lineas.append("## Mapeo de hablantes")
+        lineas.append("")
+        for hablante in datos["hablantes"]:
+            confianza = hablante["confianza"]
+            sufijo = f" (confianza {confianza})" if confianza else ""
+            lineas.append(f"- {hablante['etiqueta']} -> {hablante['nombre']}{sufijo}")
+        lineas.append("")
+
+    lineas.append("## Resumen")
+    lineas.append("")
+    lineas.append(datos["resumen"] or "(sin novedades)")
+    lineas.append("")
+
+    lineas.append("## Por persona")
+    lineas.append("")
+    if datos["por_persona"]:
+        for upd in datos["por_persona"]:
+            detalle = []
+            if upd["trabajo"]:
+                detalle.append(upd["trabajo"])
+            if upd["bloqueos"]:
+                detalle.append(f"Bloqueos: {upd['bloqueos']}")
+            if upd["proximos_pasos"]:
+                detalle.append(f"Proximos pasos: {upd['proximos_pasos']}")
+            cuerpo = " ".join(detalle) if detalle else "(sin novedades)"
+            lineas.append(f"- **{upd['persona']}**: {cuerpo}")
+    else:
+        lineas.append("(sin novedades)")
+    lineas.append("")
+
+    lineas.append("## Acciones y pendientes")
+    lineas.append("")
+    if datos["acciones"]:
+        for accion in datos["acciones"]:
+            quien = f"**{accion['persona']}** — " if accion["persona"] else ""
+            lineas.append(f"- {quien}{accion['descripcion']} ({accion['estado']})")
+    else:
+        lineas.append("(sin novedades)")
+    lineas.append("")
+
+    if datos["arrastres"]:
+        lineas.append("## Arrastres")
+        lineas.append("")
+        for arrastre in datos["arrastres"]:
+            comentario = f" — {arrastre['comentario']}" if arrastre["comentario"] else ""
+            lineas.append(
+                f"- [{arrastre['action_id']}] {arrastre['estado']}{comentario}"
+            )
+        lineas.append("")
+
+    lineas.append("## Bloqueos / riesgos")
+    lineas.append("")
+    if datos["riesgos"]:
+        for riesgo in datos["riesgos"]:
+            marcas = [m for m in (riesgo["area"], riesgo["severidad"]) if m]
+            sufijo = f" ({', '.join(marcas)})" if marcas else ""
+            lineas.append(f"- {riesgo['descripcion']}{sufijo}")
+    else:
+        lineas.append("(sin novedades)")
+    lineas.append("")
+
+    clave = TIPOS[tipo]["clave"]
+    if clave and clave in datos:
+        for campo, titulo_seccion in TIPOS[tipo]["secciones"]:
+            lineas.append(f"## {titulo_seccion}")
+            lineas.append("")
+            lineas.extend(_vinetas(datos[clave].get(campo, [])))
+            lineas.append("")
+
+    return "\n".join(lineas).rstrip() + "\n"
+
+
+# --------------------------------------------------------------------------
+# Lectura de la transcripcion
+# --------------------------------------------------------------------------
+
+_LINEA_TXT = re.compile(r"^\[(?P<etiqueta>[^\]]+)\]\s*(?P<texto>.*)$")
+_TIEMPO_SRT = re.compile(
+    r"(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})"
+)
+
+
+def _a_segundos(h: str, m: str, s: str, ms: str) -> float:
+    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
+
+
+def leer_segmentos(transcript_path: Path) -> list[dict]:
+    """Segmentos de la transcripcion, con marcas de tiempo si hay .srt.
+
+    El .txt no lleva tiempos, asi que se prefiere el .srt hermano (mismo
+    nombre, extension distinta) que si los tiene. Si no existe, se cae al .txt
+    y los segmentos quedan sin inicio/fin.
+    """
+    srt_path = transcript_path.with_suffix(".srt")
+    if srt_path.exists():
+        return _leer_srt(srt_path)
+    return _leer_txt(transcript_path)
+
+
+def _leer_srt(path: Path) -> list[dict]:
+    segmentos: list[dict] = []
+    inicio = fin = None
+    texto: list[str] = []
+
+    def cerrar() -> None:
+        if texto:
+            contenido = " ".join(texto).strip()
+            if contenido:
+                etiqueta = None
+                match = _LINEA_TXT.match(contenido)
+                if match:
+                    etiqueta = match.group("etiqueta")
+                    contenido = match.group("texto").strip()
+                segmentos.append(
+                    {
+                        "inicio": inicio,
+                        "fin": fin,
+                        "etiqueta": etiqueta,
+                        "texto": contenido,
+                    }
+                )
+        texto.clear()
+
+    for linea in path.read_text(encoding="utf-8").splitlines():
+        linea = linea.strip()
+        tiempos = _TIEMPO_SRT.match(linea)
+        if tiempos:
+            cerrar()
+            inicio = _a_segundos(*tiempos.groups()[:4])
+            fin = _a_segundos(*tiempos.groups()[4:])
+        elif not linea or linea.isdigit():
+            if not linea:
+                cerrar()
+        else:
+            texto.append(linea)
+    cerrar()
+    return segmentos
+
+
+def _leer_txt(path: Path) -> list[dict]:
+    segmentos = []
+    for linea in path.read_text(encoding="utf-8").splitlines():
+        linea = linea.strip()
+        if not linea:
+            continue
+        match = _LINEA_TXT.match(linea)
+        if match:
+            segmentos.append(
+                {
+                    "inicio": None,
+                    "fin": None,
+                    "etiqueta": match.group("etiqueta"),
+                    "texto": match.group("texto").strip(),
+                }
+            )
+        else:
+            segmentos.append(
+                {"inicio": None, "fin": None, "etiqueta": None, "texto": linea}
+            )
+    return segmentos
+
+
+_FECHA_EN_NOMBRE = re.compile(r"(?P<a>\d{4})(?P<m>\d{2})(?P<d>\d{2})[_-]?(?:\d{6})?")
+
+
+def inferir_fecha(transcript_path: Path) -> str:
+    """Fecha ISO de la reunion, del nombre del fichero o de su mtime."""
+    match = _FECHA_EN_NOMBRE.search(transcript_path.stem)
+    if match:
+        try:
+            return datetime(
+                int(match.group("a")), int(match.group("m")), int(match.group("d"))
+            ).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    mtime = datetime.fromtimestamp(transcript_path.stat().st_mtime, timezone.utc)
+    return mtime.strftime("%Y-%m-%d")
+
+
+# --------------------------------------------------------------------------
+# Persistencia
+# --------------------------------------------------------------------------
+
+
+def guardar_en_bd(
+    ruta_db: str | None,
+    datos: dict,
+    *,
+    tipo: str,
+    fecha: str,
+    titulo: str | None,
+    transcript_path: Path,
+    segmentos: list[dict],
+    modelo_llm: str,
+    modelo_whisper: str | None,
+) -> tuple[int, dict]:
+    """Vuelca el resumen y la transcripcion en SQLite. Devuelve (id, recuentos)."""
+    duracion = None
+    finales = [s["fin"] for s in segmentos if s.get("fin") is not None]
+    if finales:
+        duracion = max(finales)
+
+    audio_path = None
+    for extension in (".wav", ".mp3", ".m4a"):
+        candidato = transcript_path.with_suffix(extension)
+        if candidato.exists():
+            audio_path = str(candidato.resolve())
+            break
+
+    conn = memoria.conectar(ruta_db)
+    try:
+        meeting_id = memoria.crear_reunion(
+            conn,
+            fecha=fecha,
+            titulo=titulo,
+            tipo=tipo,
+            audio_path=audio_path,
+            transcript_path=str(transcript_path.resolve()),
+            duracion_seg=duracion,
+            modelo_whisper=modelo_whisper,
+            modelo_llm=modelo_llm,
+            resumen=datos["resumen"],
+            datos_json=datos,
+        )
+        mapa = memoria.registrar_hablantes(conn, meeting_id, datos["hablantes"])
+        recuentos = {
+            "segmentos": memoria.insertar_segmentos(conn, meeting_id, segmentos, mapa),
+            "updates": memoria.insertar_updates(conn, meeting_id, datos["por_persona"]),
+            "acciones": memoria.insertar_acciones(conn, meeting_id, datos["acciones"]),
+            "riesgos": memoria.insertar_riesgos(conn, meeting_id, datos["riesgos"]),
+            "arrastres": memoria.aplicar_arrastres(conn, meeting_id, datos["arrastres"]),
+        }
+        conn.commit()
+    finally:
+        conn.close()
+    return meeting_id, recuentos
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Resume una transcripcion de reunion usando un LLM local via LiteLLM."
     )
     parser.add_argument("transcript", help="Ruta al fichero .txt de transcripcion")
+    parser.add_argument(
+        "--tipo",
+        choices=sorted(TIPOS),
+        default="daily",
+        help="Tipo de reunion, determina el prompt y las secciones del resumen "
+        "(por defecto: daily)",
+    )
     parser.add_argument(
         "--model",
         default=DEFAULT_MODEL,
@@ -178,6 +739,34 @@ def main() -> None:
         "--sin-glosario",
         action="store_true",
         help="No usar el glosario aunque exista datos/glosario.md",
+    )
+    parser.add_argument(
+        "--db",
+        default=None,
+        help="Ruta de la base de datos del historico (por defecto: la variable "
+        f"de entorno {memoria.VARIABLE_ENTORNO}, o datos/meetings.db)",
+    )
+    parser.add_argument(
+        "--sin-bd",
+        action="store_true",
+        help="No escribir en la base de datos, solo generar el .md",
+    )
+    parser.add_argument(
+        "--fecha",
+        default=None,
+        help="Fecha de la reunion en ISO (por defecto se deduce del nombre del "
+        "fichero, y si no de su fecha de modificacion)",
+    )
+    parser.add_argument(
+        "--titulo",
+        default=None,
+        help="Titulo de la reunion, para el .md y la BD",
+    )
+    parser.add_argument(
+        "--modelo-whisper",
+        default=None,
+        help="Modelo de Whisper con el que se transcribio, solo para dejarlo "
+        "registrado en la BD",
     )
     parser.add_argument(
         "--output",
@@ -214,23 +803,77 @@ def main() -> None:
         if contenido:
             glosario = glosario_mod.texto_completo(contenido)
 
+    fecha = args.fecha or inferir_fecha(transcript_path)
+
+    output_path = (
+        Path(args.output)
+        if args.output
+        else transcript_path.with_name(f"{transcript_path.stem}_resumen.md")
+    )
+
     print(f"Modelo:    {args.model}")
     print(f"LiteLLM:   {args.base_url}")
+    print(f"Tipo:      {args.tipo}")
+    print(f"Fecha:     {fecha}")
     print(f"Glosario:  {'si' if glosario else 'no'}")
+    print(f"BD:        {'no' if args.sin_bd else memoria.ruta_bd(args.db)}")
     print(f"Resumiendo '{transcript_path.name}'...")
 
-    summary = call_litellm(
-        args.base_url, api_key, args.model, transcript, args.attendees, glosario
+    datos, crudo = pedir_resumen(
+        args.base_url,
+        api_key,
+        args.model,
+        construir_system_prompt(args.tipo, glosario),
+        construir_user_prompt(transcript, args.attendees),
     )
 
-    output_path = Path(args.output) if args.output else transcript_path.with_name(
-        f"{transcript_path.stem}_resumen.md"
-    )
-    output_path.write_text(summary.strip() + "\n", encoding="utf-8")
+    if datos is None:
+        # El modelo no ha sido capaz de devolver JSON ni tras el reintento. Se
+        # guarda su respuesta tal cual: peor que el Markdown renderizado, pero
+        # infinitamente mejor que perder la llamada.
+        output_path.write_text(crudo.strip() + "\n", encoding="utf-8")
+        print(
+            "Aviso: el modelo no devolvio JSON valido tras el reintento. Se ha "
+            "guardado su respuesta sin procesar y no se ha tocado la base de "
+            "datos.",
+            file=sys.stderr,
+        )
+        print(f"\nGuardado: {output_path}")
+        sys.exit(2)
 
+    datos = normalizar(datos, args.tipo)
+    markdown = renderizar_markdown(datos, args.tipo, fecha, args.titulo)
+    output_path.write_text(markdown, encoding="utf-8")
     print(f"\nGuardado: {output_path}")
+
+    if not args.sin_bd:
+        segmentos = leer_segmentos(transcript_path)
+        try:
+            meeting_id, recuentos = guardar_en_bd(
+                args.db,
+                datos,
+                tipo=args.tipo,
+                fecha=fecha,
+                titulo=args.titulo,
+                transcript_path=transcript_path,
+                segmentos=segmentos,
+                modelo_llm=args.model,
+                modelo_whisper=args.modelo_whisper,
+            )
+        except Exception as exc:  # el .md ya esta guardado; la BD es lo accesorio
+            print(
+                f"Aviso: no se pudo escribir en la base de datos: {exc}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"Base de datos: reunion #{meeting_id} "
+                f"({recuentos['segmentos']} segmentos, {recuentos['updates']} updates, "
+                f"{recuentos['acciones']} acciones, {recuentos['riesgos']} riesgos)"
+            )
+
     print("\n--- Resumen ---\n")
-    print(summary.strip())
+    print(markdown)
 
 
 if __name__ == "__main__":

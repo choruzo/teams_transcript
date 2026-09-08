@@ -132,6 +132,9 @@ $env:LITELLM_API_KEY = "sk-..."   # pega la key en tu terminal, no en el chat
 
 # Dar pistas de los nombres reales del equipo (ayuda a mapear SPEAKER_XX)
 .\.venv\Scripts\python.exe summarize_teams.py archivo.txt --attendees "Pablo, Javi, Jose Javier"
+
+# Otros tipos de reunión (por defecto: daily)
+.\.venv\Scripts\python.exe summarize_teams.py archivo.txt --tipo retro
 ```
 
 Genera `<nombre>_resumen.md` junto a la transcripción, con una sección de
@@ -143,6 +146,36 @@ ya que puede diferenciar qué dijo cada hablante (`SPEAKER_00`, `SPEAKER_01`,
 de la conversación (o de `--attendees` si se lo indicas) — conviene
 revisar el mapeo, puede equivocarse o marcar "no identificado" si no hay
 contexto suficiente.
+
+`--tipo {daily,workshop,retro,planning}` cambia el prompt y las secciones del
+resumen: una retro produce "qué fue bien / qué no / acciones de mejora", un
+planning "alcance comprometido / estimaciones / dudas", y un workshop "temas /
+decisiones / preguntas sin resolver". El resto de secciones es común a todos.
+
+### Histórico en SQLite
+
+Además del `.md`, cada resumen se guarda en `datos/meetings.db` (SQLite, sin
+dependencias externas): la reunión, sus segmentos de transcripción con marcas
+de tiempo, el estado por persona, las acciones y los riesgos. Es la base para
+poder consultar el histórico más adelante en vez de releer ficheros sueltos.
+
+```powershell
+# Otra ruta para la base (o define la variable de entorno TEAMS_DB)
+.\.venv\Scripts\python.exe summarize_teams.py archivo.txt --db D:\datos\meetings.db
+
+# Solo Markdown, sin tocar la base
+.\.venv\Scripts\python.exe summarize_teams.py archivo.txt --sin-bd
+```
+
+La fecha de la reunión se deduce del nombre del fichero
+(`20260907_090437_mixed.txt` → `2026-09-07`) y, si no, de su fecha de
+modificación; se puede forzar con `--fecha` y ponerle nombre con `--titulo`.
+Volver a procesar la misma transcripción **sustituye** la reunión anterior en
+vez de duplicarla, así que se puede reintentar sin ensuciar la base.
+
+El fichero contiene el texto literal de reuniones internas: vive en `datos/`,
+que está en `.gitignore`, y conviene tratarlo con el mismo cuidado que las
+grabaciones.
 
 ## Glosario del proyecto (opcional, muy recomendable)
 
