@@ -486,28 +486,72 @@ def _hoy(conn: sqlite3.Connection) -> str:
 # --------------------------------------------------------------------------
 
 
+def id_reunion_por_transcripcion(
+    conn: sqlite3.Connection, transcript_path: str
+) -> int | None:
+    """Id de la reunion ya registrada para esa transcripcion, si existe.
+
+    Lo usa `summarize_teams.py` para saber que esta reprocesando y pedir las
+    acciones abiertas *como estaban antes* de la pasada anterior.
+    """
+    fila = conn.execute(
+        "SELECT id FROM meetings WHERE transcript_path = ? ORDER BY id DESC LIMIT 1",
+        (transcript_path,),
+    ).fetchone()
+    return fila["id"] if fila else None
+
+
+# `excluir_meeting_id` no se limita a filtrar: simula el efecto de
+# `_deshacer_arrastres`, porque al reprocesar una reunion esa pasada se va a
+# deshacer igualmente. Sin esto, una accion ajena que la pasada anterior marco
+# como completada no volveria a ofrecerse al modelo y el reproceso no seria
+# idempotente.
+_SQL_ACCIONES_ABIERTAS = """
+WITH excluida(id) AS (SELECT ?),
+recientes AS (
+    SELECT id FROM meetings
+     WHERE id IS NOT (SELECT id FROM excluida)
+     ORDER BY fecha DESC, id DESC
+     LIMIT ?
+),
+calc AS (
+    SELECT a.id,
+           a.descripcion,
+           a.persona_id,
+           CASE WHEN a.meeting_id_ultima IS (SELECT id FROM excluida)
+                     AND a.estado IN ('completada', 'abandonada')
+                THEN 'abierta' ELSE a.estado END AS estado,
+           CASE WHEN a.meeting_id_ultima IS (SELECT id FROM excluida)
+                THEN MAX(1, a.menciones - 1) ELSE a.menciones END AS menciones,
+           CASE WHEN a.meeting_id_ultima IS (SELECT id FROM excluida)
+                THEN a.meeting_id_origen ELSE a.meeting_id_ultima END AS meeting_ref
+      FROM actions a
+     WHERE a.meeting_id_origen IS NOT (SELECT id FROM excluida)
+)
+SELECT c.id, c.descripcion, c.estado, c.menciones,
+       p.nombre AS persona, m.fecha AS ultima_fecha
+  FROM calc c
+  LEFT JOIN personas p ON p.id = c.persona_id
+  LEFT JOIN meetings m ON m.id = c.meeting_ref
+ WHERE c.estado NOT IN ('completada', 'abandonada')
+   AND c.meeting_ref IN (SELECT id FROM recientes)
+ ORDER BY c.menciones DESC, c.id
+"""
+
+
 def acciones_abiertas(
     conn: sqlite3.Connection,
     ultimas_reuniones: int = 5,
     excluir_meeting_id: int | None = None,
 ) -> list[sqlite3.Row]:
-    """Acciones sin cerrar vistas por ultima vez en las ultimas N reuniones."""
-    sql = """
-        SELECT a.id, a.descripcion, a.estado, a.menciones,
-               p.nombre AS persona, m.fecha AS ultima_fecha
-        FROM actions a
-        LEFT JOIN personas p ON p.id = a.persona_id
-        LEFT JOIN meetings m ON m.id = a.meeting_id_ultima
-        WHERE a.estado NOT IN ('completada', 'abandonada')
-          AND a.meeting_id_ultima IN (
-              SELECT id FROM meetings
-              WHERE (? IS NULL OR id != ?)
-              ORDER BY fecha DESC, id DESC LIMIT ?
-          )
-        ORDER BY a.menciones DESC, a.id
+    """Acciones sin cerrar vistas por ultima vez en las ultimas N reuniones.
+
+    Con `excluir_meeting_id` se ignora esa reunion: sus acciones propias no
+    se ofrecen (se borraran al reprocesarla) y las ajenas se devuelven con el
+    estado y las menciones que tenian antes de que esa pasada las tocara.
     """
     return conn.execute(
-        sql, (excluir_meeting_id, excluir_meeting_id, ultimas_reuniones)
+        _SQL_ACCIONES_ABIERTAS, (excluir_meeting_id, ultimas_reuniones)
     ).fetchall()
 
 

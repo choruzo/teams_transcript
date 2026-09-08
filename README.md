@@ -177,6 +177,44 @@ El fichero contiene el texto literal de reuniones internas: vive en `datos/`,
 que está en `.gitignore`, y conviene tratarlo con el mismo cuidado que las
 grabaciones.
 
+### Seguimiento de acciones entre reuniones (arrastres)
+
+Antes de resumir, `summarize_teams.py` consulta en la base las acciones que
+quedaron abiertas en las últimas reuniones y se las pasa al modelo **con su
+identificador**, para que diga en qué estado quedan según lo que se haya dicho
+hoy:
+
+```
+Acciones abiertas de reuniones anteriores:
+  [12] Javi - Reinstalar ULS desde cero (abierta, 3 menciones, vista por ultima vez el 2026-09-05)
+  [15] Pablo - Registrar la non-regression en la tarea (abierta, 1 mencion)
+```
+
+Lo que responda se aplica sobre la base (estado, número de menciones, fecha de
+cierre) y aparece en el `.md` en una sección **Arrastres**:
+
+```markdown
+- [12] **Javi** — Reinstalar ULS desde cero (bloqueada, 4 reuniones, ESTANCADA) — sigue esperando la licencia
+- [15] **Pablo** — Registrar la non-regression en la tarea (completada, 2 reuniones)
+```
+
+Una acción que lleva 3 reuniones o más sin cerrarse se marca como
+`ESTANCADA`: es justo lo que uno quiere ver de un vistazo.
+
+```powershell
+# Mirar más atrás (por defecto: las 5 últimas reuniones)
+.\.venv\Scripts\python.exe summarize_teams.py archivo.txt --arrastres 10
+
+# No arrastrar nada, resumir la reunión de forma aislada
+.\.venv\Scripts\python.exe summarize_teams.py archivo.txt --sin-arrastres
+```
+
+El emparejamiento va por identificador y no por texto a propósito: comparar
+descripciones entre reuniones ("reinstalar ULS" vs "la instalación de ULS") es
+frágil, mientras que elegir de una lista cerrada es una decisión acotada. Los
+identificadores que el modelo se invente se descartan en Python, así que no
+puede tocar acciones que no se le hayan ofrecido.
+
 ## Glosario del proyecto (opcional, muy recomendable)
 
 Whisper destroza sistemáticamente las siglas y nombres propios que no conoce

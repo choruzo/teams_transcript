@@ -22,6 +22,9 @@ Notas:
     Si el modelo no consigue devolver JSON valido (dos intentos), se guarda su
     respuesta cruda como .md y no se toca la BD: nunca se pierde el trabajo.
   - Con --sin-bd se reproduce el comportamiento anterior de solo Markdown.
+  - Antes de resumir se leen de la BD las acciones que quedaron abiertas en
+    las ultimas reuniones y se le pasan al modelo con su identificador, para
+    que diga en que estado quedan (--arrastres N, --sin-arrastres).
   - Si la transcripcion viene de --diarize, los hablantes apareceran como
     SPEAKER_00, SPEAKER_01, etc. (etiquetas genericas, sin nombres reales) y
     el modelo intenta mapearlos a personas por contexto.
@@ -88,9 +91,9 @@ Campos comunes del objeto JSON:
       "abierta"|"en_progreso"|"completada"|"bloqueada"}. Solo compromisos
       reales, no comentarios genericos tipo "vale, genial".
   "arrastres": lista de objetos {"action_id": <numero>, "estado":
-      "completada"|"en_progreso"|"bloqueada"|"sin_mencion", "comentario":
-      "..."}. Dejala vacia salvo que se te haya dado una lista de acciones
-      abiertas anteriores con sus identificadores.
+      "completada"|"en_progreso"|"bloqueada"|"abierta"|"abandonada"|
+      "sin_mencion", "comentario": "..."}. Dejala vacia salvo que se te haya
+      dado una lista de acciones abiertas anteriores con sus identificadores.
   "riesgos": lista de objetos {"descripcion": "...", "area": "<componente o
       null>", "severidad": "alta"|"media"|"baja"}.
 """
@@ -165,6 +168,29 @@ TIPOS = {
 }
 
 
+ARRASTRES_PROMPT = (
+    "\n\nEn el mensaje del usuario recibiras una lista de acciones que "
+    "quedaron abiertas en reuniones anteriores, cada una con su identificador "
+    "entre corchetes. Para cada una, decide a partir de lo que se diga en esta "
+    "transcripcion en que estado queda y devuelvelo en \"arrastres\" usando "
+    "**exactamente** ese identificador:\n"
+    "  - \"completada\": se dice que ya esta hecha.\n"
+    "  - \"en_progreso\": se esta trabajando en ella.\n"
+    "  - \"bloqueada\": se menciona que algo la impide avanzar.\n"
+    "  - \"abierta\": se menciona pero sigue igual, sin avance.\n"
+    "  - \"abandonada\": se decide no hacerla.\n"
+    "  - \"sin_mencion\": no se habla de ella en esta reunion.\n"
+    "Incluye una entrada por cada accion de la lista, tambien las que no se "
+    "mencionan, y anade en \"comentario\" lo que se haya dicho al respecto (o "
+    "\"\" si no se ha dicho nada). No uses identificadores que no esten en la "
+    "lista, y no repitas en \"acciones\" una accion que ya venga con "
+    "identificador: \"acciones\" es solo para compromisos nuevos de esta "
+    "reunion.\n"
+    "Ojo: que alguien hable del mismo tema no significa que la accion haya "
+    "avanzado. Si no queda claro, deja el estado que ya tenia."
+)
+
+
 GLOSARIO_PROMPT = (
     "\n\nGlosario del proyecto. Usalo para reconocer y **corregir** los "
     "terminos que la transcripcion automatica haya deformado (siglas, nombres "
@@ -181,7 +207,9 @@ GLOSARIO_PROMPT = (
 # --------------------------------------------------------------------------
 
 
-def construir_system_prompt(tipo: str, glosario: str | None) -> str:
+def construir_system_prompt(
+    tipo: str, glosario: str | None, con_arrastres: bool = False
+) -> str:
     conf = TIPOS[tipo]
     partes = [
         BASE_PROMPT,
@@ -198,12 +226,16 @@ def construir_system_prompt(tipo: str, glosario: str | None) -> str:
         "\nSi una lista no tiene contenido relevante, devuelvela vacia; no "
         "inventes elementos para rellenar."
     )
+    if con_arrastres:
+        partes.append(ARRASTRES_PROMPT)
     if glosario:
         partes.append(GLOSARIO_PROMPT + glosario)
     return "".join(partes)
 
 
-def construir_user_prompt(transcript: str, attendees: str | None) -> str:
+def construir_user_prompt(
+    transcript: str, attendees: str | None, arrastres: str | None = None
+) -> str:
     partes = []
     if attendees:
         partes.append(
@@ -211,8 +243,35 @@ def construir_user_prompt(transcript: str, attendees: str | None) -> str:
             f"todos presentes hoy, usalo solo como pista para el mapeo de "
             f"hablantes): {attendees}\n\n"
         )
+    if arrastres:
+        partes.append(arrastres + "\n\n")
     partes.append(f"Transcripcion de la reunion:\n\n{transcript}")
     return "".join(partes)
+
+
+def formatear_acciones_abiertas(filas) -> str:
+    """Lista de acciones abiertas anteriores, tal como la ve el modelo.
+
+    El identificador entre corchetes es lo que convierte el emparejamiento en
+    una eleccion entre opciones cerradas, en vez de en generacion libre:
+    comparar descripciones entre reuniones ("reinstalar WLS" vs "la
+    instalacion de WLS") es mucho menos fiable.
+    """
+    lineas = ["Acciones abiertas de reuniones anteriores:"]
+    for fila in filas:
+        quien = fila["persona"] or "sin asignar"
+        menciones = fila["menciones"]
+        plural = "menciones" if menciones != 1 else "mencion"
+        visto = (
+            f", vista por ultima vez el {fila['ultima_fecha']}"
+            if fila["ultima_fecha"]
+            else ""
+        )
+        lineas.append(
+            f"  [{fila['id']}] {quien} - {fila['descripcion']} "
+            f"({fila['estado']}, {menciones} {plural}{visto})"
+        )
+    return "\n".join(lineas)
 
 
 # --------------------------------------------------------------------------
@@ -295,11 +354,21 @@ def _lista_de_textos(valor) -> list[str]:
     return [str(item).strip() for item in valor if str(item).strip()]
 
 
-def normalizar(datos: dict, tipo: str) -> dict:
+UMBRAL_ESTANCAMIENTO = 3
+
+
+def normalizar(
+    datos: dict, tipo: str, acciones_previas: dict[int, dict] | None = None
+) -> dict:
     """Valida y normaliza el JSON del modelo antes de usarlo.
 
     Se toleran claves ausentes o con el tipo equivocado (se sustituyen por
     vacio); lo que no se tolera es meter en la BD algo que no sea lo esperado.
+
+    `acciones_previas` es el {action_id: fila} que se le ofrecio al modelo.
+    Los arrastres se validan contra esa lista: sin ella no se acepta ninguno
+    (el modelo se los estaria inventando), y con ella se descartan los ids
+    ajenos y se enriquecen con la descripcion real para el Markdown.
     """
     limpio = {
         "resumen": str(datos.get("resumen") or "").strip(),
@@ -350,16 +419,35 @@ def normalizar(datos: dict, tipo: str) -> dict:
             }
         )
 
+    previas = acciones_previas or {}
+    vistos: set[int] = set()
     for arrastre in _lista_de_dicts(datos, "arrastres"):
         try:
             action_id = int(arrastre.get("action_id"))
         except (TypeError, ValueError):
             continue
+        if action_id not in previas or action_id in vistos:
+            continue
+        estado = str(arrastre.get("estado") or "").strip().lower()
+        if estado not in memoria.ESTADOS_ACCION:
+            # "sin_mencion" y cualquier invencion del modelo se quedan fuera:
+            # no cambian nada en la BD y solo ensuciarian el Markdown.
+            continue
+        vistos.add(action_id)
+        fila = previas[action_id]
+        menciones = (fila["menciones"] or 0) + 1
         limpio["arrastres"].append(
             {
                 "action_id": action_id,
-                "estado": str(arrastre.get("estado") or "").strip().lower(),
+                "estado": estado,
                 "comentario": str(arrastre.get("comentario") or "").strip(),
+                "descripcion": fila["descripcion"],
+                "persona": fila["persona"] or "",
+                "menciones": menciones,
+                "estancada": (
+                    estado not in ("completada", "abandonada")
+                    and menciones >= UMBRAL_ESTANCAMIENTO
+                ),
             }
         )
 
@@ -496,9 +584,20 @@ def renderizar_markdown(
         lineas.append("## Arrastres")
         lineas.append("")
         for arrastre in datos["arrastres"]:
-            comentario = f" — {arrastre['comentario']}" if arrastre["comentario"] else ""
+            quien = f"**{arrastre['persona']}** — " if arrastre.get("persona") else ""
+            descripcion = arrastre.get("descripcion") or ""
+            cuerpo = f"{descripcion} " if descripcion else ""
+            marcas = [arrastre["estado"]]
+            if arrastre.get("menciones"):
+                marcas.append(f"{arrastre['menciones']} reuniones")
+            if arrastre.get("estancada"):
+                marcas.append("ESTANCADA")
+            comentario = (
+                f" — {arrastre['comentario']}" if arrastre["comentario"] else ""
+            )
             lineas.append(
-                f"- [{arrastre['action_id']}] {arrastre['estado']}{comentario}"
+                f"- [{arrastre['action_id']}] {quien}{cuerpo}"
+                f"({', '.join(marcas)}){comentario}"
             )
         lineas.append("")
 
@@ -636,6 +735,28 @@ def inferir_fecha(transcript_path: Path) -> str:
 # --------------------------------------------------------------------------
 
 
+def cargar_acciones_abiertas(
+    ruta_db: str | None, transcript_path: Path, ultimas_reuniones: int
+) -> dict[int, dict]:
+    """Acciones abiertas de reuniones anteriores, indexadas por su id.
+
+    Si esta transcripcion ya se proceso antes, su reunion se excluye: sus
+    acciones propias desapareceran al reprocesar y las ajenas se devuelven
+    como estaban antes de aquella pasada.
+    """
+    conn = memoria.conectar(ruta_db)
+    try:
+        previa = memoria.id_reunion_por_transcripcion(
+            conn, str(transcript_path.resolve())
+        )
+        filas = memoria.acciones_abiertas(
+            conn, ultimas_reuniones, excluir_meeting_id=previa
+        )
+    finally:
+        conn.close()
+    return {fila["id"]: dict(fila) for fila in filas}
+
+
 def guardar_en_bd(
     ruta_db: str | None,
     datos: dict,
@@ -752,6 +873,19 @@ def main() -> None:
         help="No escribir en la base de datos, solo generar el .md",
     )
     parser.add_argument(
+        "--arrastres",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Numero de reuniones anteriores de las que traer acciones "
+        "abiertas para que el modelo actualice su estado (por defecto: 5)",
+    )
+    parser.add_argument(
+        "--sin-arrastres",
+        action="store_true",
+        help="No consultar las acciones abiertas de reuniones anteriores",
+    )
+    parser.add_argument(
         "--fecha",
         default=None,
         help="Fecha de la reunion en ISO (por defecto se deduce del nombre del "
@@ -811,20 +945,44 @@ def main() -> None:
         else transcript_path.with_name(f"{transcript_path.stem}_resumen.md")
     )
 
+    acciones_previas: dict[int, dict] = {}
+    bloque_arrastres = None
+    if not args.sin_bd and not args.sin_arrastres and args.arrastres > 0:
+        try:
+            acciones_previas = cargar_acciones_abiertas(
+                args.db, transcript_path, args.arrastres
+            )
+        except Exception as exc:  # sin arrastres se resume igual, solo peor
+            print(
+                f"Aviso: no se pudieron leer las acciones abiertas: {exc}",
+                file=sys.stderr,
+            )
+        if acciones_previas:
+            bloque_arrastres = formatear_acciones_abiertas(acciones_previas.values())
+
     print(f"Modelo:    {args.model}")
     print(f"LiteLLM:   {args.base_url}")
     print(f"Tipo:      {args.tipo}")
     print(f"Fecha:     {fecha}")
     print(f"Glosario:  {'si' if glosario else 'no'}")
     print(f"BD:        {'no' if args.sin_bd else memoria.ruta_bd(args.db)}")
+    print(
+        f"Arrastres: "
+        + (
+            f"{len(acciones_previas)} acciones abiertas de las ultimas "
+            f"{args.arrastres} reuniones"
+            if acciones_previas
+            else "no"
+        )
+    )
     print(f"Resumiendo '{transcript_path.name}'...")
 
     datos, crudo = pedir_resumen(
         args.base_url,
         api_key,
         args.model,
-        construir_system_prompt(args.tipo, glosario),
-        construir_user_prompt(transcript, args.attendees),
+        construir_system_prompt(args.tipo, glosario, bool(bloque_arrastres)),
+        construir_user_prompt(transcript, args.attendees, bloque_arrastres),
     )
 
     if datos is None:
@@ -841,7 +999,7 @@ def main() -> None:
         print(f"\nGuardado: {output_path}")
         sys.exit(2)
 
-    datos = normalizar(datos, args.tipo)
+    datos = normalizar(datos, args.tipo, acciones_previas)
     markdown = renderizar_markdown(datos, args.tipo, fecha, args.titulo)
     output_path.write_text(markdown, encoding="utf-8")
     print(f"\nGuardado: {output_path}")
@@ -869,7 +1027,8 @@ def main() -> None:
             print(
                 f"Base de datos: reunion #{meeting_id} "
                 f"({recuentos['segmentos']} segmentos, {recuentos['updates']} updates, "
-                f"{recuentos['acciones']} acciones, {recuentos['riesgos']} riesgos)"
+                f"{recuentos['acciones']} acciones, {recuentos['riesgos']} riesgos, "
+                f"{recuentos['arrastres']} arrastres)"
             )
 
     print("\n--- Resumen ---\n")

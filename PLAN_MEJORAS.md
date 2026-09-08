@@ -1,6 +1,6 @@
 # Plan de mejoras: de "transcriptor" a "memoria del equipo"
 
-Redactado el 2026-09-07. **Fases 0 y 1 implementadas** (Fase 1 el
+Redactado el 2026-09-07. **Fases 0, 1 y 2 implementadas** (las fases 1 y 2 el
 2026-09-08); el resto es propuesta.
 
 ## 0. Decisiones tomadas (2026-09-07)
@@ -341,10 +341,11 @@ Desviaciones respecto a lo planificado, todas conscientes:
    (`acciones_abiertas`, `aplicar_arrastres`) y la clave `arrastres` viaja en
    el JSON y se renderiza, pero todavía no se inyectan las acciones abiertas
    en el prompt: eso es la Fase 2, y es lo único que falta para cerrarla.
+   *(Hecho el 2026-09-08, ver el resultado de la Fase 2.)*
 
 ---
 
-## Fase 2 — Seguimiento de acciones entre reuniones
+## Fase 2 — Seguimiento de acciones entre reuniones — IMPLEMENTADA
 
 **Resuelve:** P4. **Esfuerzo:** bajo una vez existe la Fase 1.
 **Es la mejora que da el enfoque de gestión.**
@@ -374,6 +375,62 @@ detección de estancamiento: *"WLS de Javi: 3 dailys abierta, sin avance"*.
 **Criterio de aceptación:** procesar dos dailys consecutivas y comprobar que
 una acción de la primera aparece en la sección "Arrastres" de la segunda con
 el estado correcto.
+
+### Resultado (2026-09-08)
+
+Ficheros tocados: `summarize_teams.py` (flags, prompt, validación y
+renderizado) y `memoria.py` (`acciones_abiertas` reescrita,
+`id_reunion_por_transcripcion` nueva). `transcribe_teams.py` sigue sin
+tocarse.
+
+Flujo implementado: `cargar_acciones_abiertas` lee las acciones sin cerrar de
+las últimas N reuniones (`--arrastres N`, por defecto 5; `--sin-arrastres` y
+`--sin-bd` lo desactivan) y las inyecta en el *user prompt* con su id. El
+`ARRASTRES_PROMPT` solo se añade al *system prompt* cuando esa lista existe,
+así que una base vacía deja el comportamiento de la Fase 1 intacto.
+
+Decisiones tomadas al implementar:
+
+1. **La validación va contra la lista ofrecida, no contra la BD.** Sin lista
+   no se acepta ningún arrastre (el modelo se los estaría inventando); con
+   ella se descartan ids ajenos, duplicados y estados fuera de
+   `ESTADOS_ACCION`. `sin_mencion` se acepta del modelo y se descarta al
+   normalizar: no cambia nada en la BD y solo ensuciaría el `.md`.
+2. **Estados ampliados a los cinco de `ESTADOS_ACCION`.** El plan proponía
+   cuatro; faltaban `abierta` ("se menciona pero sigue igual") y `abandonada`
+   ("se decide no hacerla"), que son estados reales del ciclo de vida y ya
+   existían en el esquema.
+3. **El reproceso tenía que ser idempotente y no lo era.**
+   `acciones_abiertas(excluir_meeting_id=...)` ya no se limita a filtrar: si
+   la transcripción ya estaba registrada, simula el efecto de
+   `_deshacer_arrastres` y devuelve las acciones ajenas con el estado y las
+   menciones **anteriores** a aquella pasada. Sin eso, una acción cerrada por
+   la pasada previa no volvía a ofrecerse al modelo y el segundo procesado
+   daba un resultado distinto del primero.
+4. **Estancamiento visible en el `.md`**, no solo consultable: a partir de
+   `UMBRAL_ESTANCAMIENTO = 3` menciones sin cerrarse, el arrastre se marca
+   `ESTANCADA`. La sección "Arrastres" muestra además la descripción y la
+   persona reales (que salen de la BD, no del modelo), las reuniones que lleva
+   y el comentario.
+
+Verificado de extremo a extremo contra un servidor que imita
+`/chat/completions`, con dos dailys consecutivas:
+
+- Criterio de aceptación cumplido: las dos acciones de la daily 1 aparecen en
+  la sección "Arrastres" de la daily 2 con el estado que dio el modelo
+  (`bloqueada` y `completada`), y en la BD suben a 2 menciones con
+  `meeting_id_ultima` apuntando a la segunda reunión.
+- Robustez: de cuatro arrastres devueltos por el "modelo" (dos válidos, uno
+  con id inventado, uno `sin_mencion`) solo se aplican los dos válidos.
+- Idempotencia: reprocesar la daily 2 deja exactamente las mismas filas.
+- `--sin-arrastres` no consulta la BD, no inyecta la lista y deshace el efecto
+  de la pasada anterior (las menciones vuelven a 1), como corresponde a
+  reprocesar la reunión sin arrastres.
+
+**Pendiente, menor:** las acciones abiertas que el modelo marca `sin_mencion`
+no aparecen en el `.md`; su seguimiento (cuántas reuniones llevan sin
+mencionarse) queda para el `report_teams.py` de la Fase 5, que es donde
+encaja.
 
 ---
 
@@ -495,7 +552,7 @@ reuniones juntas no caben en la ventana del modelo local. Se necesita:
 |---|---|---|---|---|
 | ~~1~~ | ~~Fase 0 — Glosario~~ **hecha** | Bajo | Nulo | Calidad de todo lo demás |
 | ~~2~~ | ~~Fase 1 — JSON + SQLite~~ **hecha** | Medio | Bajo | Fases 2, 4, 5 |
-| 3 | Fase 2 — Arrastres | Bajo | Bajo | El valor de gestión |
+| ~~3~~ | ~~Fase 2 — Arrastres~~ **hecha** | Bajo | Bajo | El valor de gestión |
 | 4 | Fase 4 — `ask_teams.py` | Medio | Bajo | Consulta del histórico |
 | 5 | Fase 5 — `report_teams.py` | Bajo | Nulo | Informes |
 | 6 | Fase 3 — Perfiles de voz | Medio-alto | **Alto** | Calidad a largo plazo |

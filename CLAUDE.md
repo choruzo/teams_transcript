@@ -55,6 +55,25 @@ No hay suite de tests ni linter en el repo; verificar cambios ejecutando los scr
 - **El LLM devuelve JSON, no Markdown** (`summarize_teams.py`, Fase 1 del plan): se pide un objeto JSON con esquema fijo (`temperature` 0.1) y el `.md` se **renderiza en Python** desde ese JSON (`renderizar_markdown`), de modo que una sola llamada alimenta el fichero y la BD. `extraer_json` acepta el JSON envuelto en bloque de código o rodeado de prosa; si falla, hay **un** reintento devolviéndole al modelo su propia respuesta, y si vuelve a fallar se guarda la respuesta cruda como `.md`, se avisa por stderr y se sale con código 2 sin tocar la BD. `normalizar()` tolera claves ausentes o del tipo equivocado, pero nada sin validar entra en SQLite.
 - **Tipos de reunión** (`--tipo {daily,workshop,retro,planning}`, por defecto `daily`): diccionario `TIPOS` en `summarize_teams.py`. Cada tipo cambia el enfoque del prompt y aporta **una clave JSON propia** (`retro`, `planning`, `workshop`) que se renderiza como secciones extra; el resto del esquema es común, para que la BD y los futuros informes no tengan que saber de tipos. `daily` no añade clave: es el comportamiento de siempre.
 - **Almacén SQLite** (`memoria.py`): esquema idempotente (`CREATE TABLE IF NOT EXISTS` + `PRAGMA user_version`, hoy versión 1). Ruta: `--db` > variable `TEAMS_DB` > `datos/meetings.db`. `segments_fts` es una tabla FTS5 de *contenido externo*, sincronizada con tres triggers (insert/delete/update); si se toca `segments` por otra vía hay que mantenerlos. Tokenizador `unicode61 remove_diacritics 2`, así que la búsqueda ignora acentos pero **no** hace stemming.
+- **Arrastres entre reuniones** (Fase 2): antes de llamar al LLM,
+  `cargar_acciones_abiertas` lee de la BD las acciones sin cerrar de las
+  últimas N reuniones (`--arrastres N`, por defecto 5; `--sin-arrastres` lo
+  desactiva, igual que `--sin-bd`) y las inyecta en el *user prompt* con su
+  `action_id`; el *system prompt* solo lleva las instrucciones de arrastre
+  (`ARRASTRES_PROMPT`) si esa lista existe. La respuesta se valida en
+  `normalizar()` **contra esa misma lista**: sin lista no se acepta ningún
+  arrastre, y con ella se descartan los ids inventados, los duplicados y los
+  estados fuera de `ESTADOS_ACCION` (incluido `sin_mencion`, que el modelo sí
+  puede devolver pero no cambia nada). Los que sobreviven se enriquecen con la
+  descripción y la persona reales para el Markdown, y se marcan `ESTANCADA` a
+  partir de `UMBRAL_ESTANCAMIENTO` (3) menciones sin cerrarse.
+- **`acciones_abiertas(excluir_meeting_id=...)` simula el deshacer**: al
+  reprocesar una transcripción ya registrada (su id se obtiene con
+  `id_reunion_por_transcripcion`), esa reunión se excluye y las acciones
+  *ajenas* que aquella pasada tocó se devuelven con el estado y las menciones
+  que tenían **antes** — lo mismo que hará `_deshacer_arrastres` al borrarla
+  después. Sin eso, una acción que la pasada anterior dio por completada no
+  volvería a ofrecerse al modelo y el reproceso no sería idempotente.
 - **Reprocesar una reunión la sustituye**: `crear_reunion(..., reemplazar=True)` borra la fila anterior con el mismo `transcript_path` (cascada a segmentos, updates, riesgos y acciones nacidas en ella). Antes llama a `_deshacer_arrastres`, que devuelve a su origen las acciones *ajenas* que esa pasada actualizó: sin eso, la FK `actions.meeting_id_ultima` (sin `ON DELETE`) impediría el borrado y las menciones quedarían infladas. El estado previo no se guarda, así que las cerradas por esa reunión vuelven a `abierta`.
 - **Los segmentos entran por `summarize_teams.py`, no por `transcribe_teams.py`**: se leen del `.srt` hermano (mismo nombre, otra extensión) porque el `.txt` no lleva marcas de tiempo; si no existe el `.srt` se cae al `.txt` con `inicio`/`fin` a NULL. Decisión deliberada para no tocar la parte frágil del pipeline (Whisper/pyannote/GPU) en la Fase 1.
 - **Nombres genéricos no crean personas**: `obtener_o_crear_persona` devuelve `None` para `SPEAKER_XX`, "no identificado" y similares; las filas quedan con `persona_id` NULL en vez de inventar gente. El emparejamiento es por nombre sin distinguir mayúsculas y por la lista de alias (`personas.alias`, JSON).
