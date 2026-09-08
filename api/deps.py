@@ -43,13 +43,18 @@ def ruta_bd() -> Path:
 def conexion() -> Iterator[sqlite3.Connection]:
     """Una conexion de solo lectura por peticion.
 
-    Se abre y se cierra en cada peticion a proposito: sqlite3 no comparte
-    conexiones entre hilos, y FastAPI ejecuta las rutas sincronas en un pool.
-    Abrir una conexion a un fichero local cuesta microsegundos.
+    Se abre y se cierra en cada peticion a proposito: abrir un fichero local
+    cuesta microsegundos y asi ninguna conexion sobrevive a la peticion que la
+    creo. `entre_hilos` es obligatorio: FastAPI ejecuta las rutas sincronas en
+    un pool y el `finally` de esta dependencia puede caer en un hilo distinto
+    del que abrio la conexion. Solo se nota con varias peticiones a la vez
+    -- la pagina lanza tres en paralelo --, que es como se descubrio.
     """
     path = ruta_bd()
     try:
-        conn = memoria.conectar(path, solo_lectura=solo_lectura())
+        conn = memoria.conectar(
+            path, solo_lectura=solo_lectura(), entre_hilos=True
+        )
     except FileNotFoundError:
         # Mensaje util en vez de un 500 opaco: en el servidor, esto casi
         # siempre significa que el volumen no esta montado donde se cree.

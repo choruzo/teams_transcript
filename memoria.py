@@ -26,6 +26,7 @@ import json
 import os
 import re
 import sqlite3
+from datetime import date
 from pathlib import Path
 
 ESQUEMA_VERSION = 2
@@ -49,6 +50,17 @@ ESTADOS_ACCION = (
     "bloqueada",
     "abandonada",
 )
+
+# Una accion deja de estar viva cuando llega a uno de estos dos estados. Se
+# declara aparte porque la distincion "sigue en el aire / ya no" aparece en
+# media docena de consultas y en las metricas de la interfaz.
+ESTADOS_CERRADOS = ("completada", "abandonada")
+
+# Menciones a partir de las cuales una accion abierta se considera estancada.
+# Vivia en summarize_teams.py, pero la interfaz necesita el mismo numero para
+# no contradecir a la seccion "Arrastres" del .md: el umbral es un hecho del
+# dominio, no del generador de resumenes.
+UMBRAL_ESTANCAMIENTO = 3
 
 # El LLM razona mejor con etiquetas que con numeros; la BD guarda un valor
 # comparable. Este es el unico punto donde se traduce entre ambos.
@@ -165,19 +177,30 @@ def ruta_bd(explicita: Path | str | None = None) -> Path:
 
 
 def conectar(
-    ruta: Path | str | None = None, solo_lectura: bool = False
+    ruta: Path | str | None = None,
+    solo_lectura: bool = False,
+    entre_hilos: bool = False,
 ) -> sqlite3.Connection:
     """Abre (creando si hace falta) la BD y garantiza el esquema.
 
     Con `solo_lectura` la conexion rechaza cualquier escritura y **no** toca el
     esquema: es la que debe usar todo lo que solo consulta (la API web), para
     que un error de programacion no pueda corromper el historico.
+
+    Con `entre_hilos` se levanta la comprobacion de hilo de sqlite3. Hace falta
+    en la API: FastAPI ejecuta las rutas sincronas en un pool y puede abrir la
+    conexion en un hilo y cerrarla en otro, lo que aborta con "SQLite objects
+    created in a thread can only be used in that same thread" **solo cuando
+    llegan varias peticiones a la vez**. La conexion se crea y se destruye
+    dentro de una peticion y no se comparte con ninguna otra, asi que la
+    comprobacion no protege de nada aqui. Quien reutilice una conexion entre
+    peticiones tendra que serializar el acceso por su cuenta.
     """
     path = ruta_bd(ruta)
     if solo_lectura:
         if not path.exists():
             raise FileNotFoundError(f"No existe la base de datos: {path}")
-        conn = sqlite3.connect(path)
+        conn = sqlite3.connect(path, check_same_thread=not entre_hilos)
         conn.row_factory = sqlite3.Row
         # Se usa `query_only` y no la URI `mode=ro` a proposito: con la base en
         # modo WAL, una conexion abierta como `mode=ro` no puede crear el
@@ -189,7 +212,7 @@ def conectar(
         return conn
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, check_same_thread=not entre_hilos)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     # WAL permite que la API lea mientras el pipeline escribe. Es una propiedad
@@ -764,6 +787,273 @@ def resumen_bd(conn: sqlite3.Connection) -> dict:
         "primera_reunion": fechas["primera"],
         "ultima_reunion": fechas["ultima"],
     }
+
+
+# --------------------------------------------------------------------------
+# Metricas y carriles de accion (los explota el timeline de la interfaz)
+# --------------------------------------------------------------------------
+
+# Las cifras se agrupan por semana en Python y no en SQL a proposito:
+# `strftime('%G-W%V')` (semana ISO) solo existe en SQLite 3.46 y posteriores, y
+# la version del servidor de despliegue no esta fijada. `date.isocalendar()` de
+# la stdlib da lo mismo en cualquier sitio.
+
+
+def _placeholders(valores) -> str:
+    return ", ".join("?" for _ in valores)
+
+
+def _y(where: str) -> str:
+    """Convierte el `WHERE ...` de `_filtros_reuniones` en un `AND ...`.
+
+    Las subconsultas de `metricas` ya traen su propia condicion sobre la
+    persona, asi que el filtro de fechas tiene que encadenarse, no abrir un
+    WHERE nuevo. Devuelve cadena vacia si no habia filtro.
+    """
+    return where.replace(" WHERE ", " AND ", 1) if where else ""
+
+
+def _semana_iso(fecha: str) -> str | None:
+    """`2026-09-07` -> `2026-W37`. Devuelve None si la fecha no es una fecha."""
+    try:
+        anio, semana, _ = date.fromisoformat(fecha).isocalendar()
+    except (TypeError, ValueError):
+        return None
+    return f"{anio}-W{semana:02d}"
+
+
+def _agrupar_riesgos(filas: list[sqlite3.Row]) -> dict:
+    """Riesgos **mencionados** en el periodo, que es lo unico que el dato dice.
+
+    La tabla `risks` no tiene estado ni continuidad entre reuniones (D3): un
+    riesgo que nadie volvio a nombrar desaparece del recuento. Por eso ni esta
+    funcion ni la interfaz hablan nunca de riesgos "abiertos".
+    """
+    por_severidad: dict[str, int] = {}
+    por_area: dict[str, int] = {}
+    total = 0
+    for fila in filas:
+        total += fila["n"]
+        severidad = (fila["severidad"] or "").strip().lower() or "sin severidad"
+        por_severidad[severidad] = por_severidad.get(severidad, 0) + fila["n"]
+        area = (fila["area"] or "").strip() or "sin área"
+        por_area[area] = por_area.get(area, 0) + fila["n"]
+    return {
+        "total": total,
+        "por_severidad": por_severidad,
+        "por_area": [
+            {"area": area, "n": n}
+            for area, n in sorted(por_area.items(), key=lambda par: (-par[1], par[0]))
+        ],
+    }
+
+
+def metricas(
+    conn: sqlite3.Connection,
+    *,
+    desde: str | None = None,
+    hasta: str | None = None,
+) -> dict:
+    """Agregados deterministas para el panel de salud del equipo.
+
+    Salen de SQL, nunca del LLM: son numeros comprobables, no una lectura del
+    modelo sobre lo que dijo la gente.
+
+    **Dos bloques con dos alcances distintos**, y hay que respetarlos al
+    presentarlos. `acciones` y `estancadas` describen el estado **de hoy** del
+    historico completo: una accion no tiene fecha propia, asi que recortarla al
+    periodo daria un "abiertas: 3" que no significaria nada. Todo lo demas
+    (`reuniones`, `semanas`, `personas`, `riesgos`) es lo ocurrido **en el
+    periodo** filtrado.
+
+    Lo que no esta, falta por falta de dato y no por olvido: tiempo medio de
+    cierre (D4: `cerrada_en` es la fecha de proceso), personas sin actualizar
+    (D7: no hay roster) y bloqueos recurrentes (D8: texto libre).
+    """
+    where, valores = _filtros_reuniones(desde, hasta, None)
+
+    por_estado = {estado: 0 for estado in ESTADOS_ACCION}
+    for fila in conn.execute(
+        "SELECT estado, count(*) AS n FROM actions GROUP BY estado"
+    ):
+        # Un estado inesperado (escrito por una version anterior) se cuenta
+        # igualmente: es preferible a que los totales no cuadren.
+        por_estado[fila["estado"]] = por_estado.get(fila["estado"], 0) + fila["n"]
+
+    estancadas = conn.execute(
+        f"""
+        SELECT count(*) FROM actions
+         WHERE menciones >= ?
+           AND estado NOT IN ({_placeholders(ESTADOS_CERRADOS)})
+        """,
+        (UMBRAL_ESTANCAMIENTO, *ESTADOS_CERRADOS),
+    ).fetchone()[0]
+
+    reuniones = conn.execute(
+        f"SELECT m.fecha, m.tipo, m.duracion_seg FROM meetings m {where}"
+        " ORDER BY m.fecha",
+        valores,
+    ).fetchall()
+
+    # `cerrada_en` se compara con el mismo rango que las reuniones aunque sea
+    # la fecha de *proceso* y no la del cierre real (D4). Es la unica que hay;
+    # la interfaz lo advierte al lado del numero en vez de callarselo.
+    cierres = conn.execute(
+        "SELECT cerrada_en FROM actions WHERE cerrada_en IS NOT NULL"
+        + (" AND cerrada_en >= ?" if desde else "")
+        + (" AND cerrada_en <= ?" if hasta else ""),
+        [f for f in (desde, hasta) if f],
+    ).fetchall()
+
+    semanas: dict[str, dict] = {}
+
+    def semana(clave: str) -> dict:
+        return semanas.setdefault(
+            clave,
+            {
+                "semana": clave,
+                "reuniones": 0,
+                "minutos": 0.0,
+                "sin_duracion": 0,
+                "cierres": 0,
+            },
+        )
+
+    minutos_totales = 0.0
+    sin_duracion = 0
+    por_tipo = {tipo: 0 for tipo in TIPOS_REUNION}
+    for fila in reuniones:
+        por_tipo[fila["tipo"]] = por_tipo.get(fila["tipo"], 0) + 1
+        clave = _semana_iso(fila["fecha"])
+        casilla = semana(clave) if clave else None
+        if casilla:
+            casilla["reuniones"] += 1
+        # D9: sin `.srt` la duracion es NULL. Se cuentan aparte para poder
+        # decir "90 min en 3 de 5 reuniones" en vez de mentir con la suma.
+        if fila["duracion_seg"] is None:
+            sin_duracion += 1
+            if casilla:
+                casilla["sin_duracion"] += 1
+        else:
+            minutos_totales += fila["duracion_seg"] / 60
+            if casilla:
+                casilla["minutos"] += fila["duracion_seg"] / 60
+
+    for fila in cierres:
+        clave = _semana_iso(fila["cerrada_en"])
+        if clave:
+            semana(clave)["cierres"] += 1
+
+    for casilla in semanas.values():
+        casilla["minutos"] = round(casilla["minutos"])
+
+    personas = [
+        dict(fila)
+        for fila in conn.execute(
+            f"""
+            SELECT p.nombre AS persona,
+                   (SELECT count(*) FROM updates u
+                      JOIN meetings m ON m.id = u.meeting_id
+                     WHERE u.persona_id = p.id {_y(where)}) AS updates,
+                   (SELECT count(*) FROM actions a
+                      JOIN meetings m ON m.id = a.meeting_id_origen
+                     WHERE a.persona_id = p.id {_y(where)}) AS acciones,
+                   (SELECT count(*) FROM actions a
+                     WHERE a.persona_id = p.id
+                       AND a.estado NOT IN
+                           ({_placeholders(ESTADOS_CERRADOS)})) AS abiertas
+              FROM personas p
+             ORDER BY p.nombre
+            """,
+            (*valores, *valores, *ESTADOS_CERRADOS),
+        ).fetchall()
+    ]
+    # Quien no aparece en el periodo y no arrastra nada abierto no se muestra:
+    # sin roster (D7) no se puede distinguir "no hablo" de "ya no esta".
+    personas = [p for p in personas if p["updates"] or p["acciones"] or p["abiertas"]]
+    personas.sort(key=lambda p: (-p["abiertas"], -p["acciones"], p["persona"]))
+
+    riesgos = conn.execute(
+        f"""
+        SELECT r.severidad, r.area, count(*) AS n
+          FROM risks r JOIN meetings m ON m.id = r.meeting_id
+          {where}
+         GROUP BY r.severidad, r.area
+        """,
+        valores,
+    ).fetchall()
+
+    return {
+        "desde": desde,
+        "hasta": hasta,
+        "umbral_estancamiento": UMBRAL_ESTANCAMIENTO,
+        "acciones": por_estado,
+        "acciones_abiertas": sum(
+            n for estado, n in por_estado.items() if estado not in ESTADOS_CERRADOS
+        ),
+        "estancadas": estancadas,
+        "reuniones": len(reuniones),
+        "reuniones_por_tipo": por_tipo,
+        "minutos": round(minutos_totales),
+        "reuniones_sin_duracion": sin_duracion,
+        "semanas": sorted(semanas.values(), key=lambda s: s["semana"]),
+        "personas": personas,
+        "riesgos": _agrupar_riesgos(riesgos),
+    }
+
+
+def carriles_acciones(
+    conn: sqlite3.Connection,
+    *,
+    desde: str | None = None,
+    hasta: str | None = None,
+    solo_abiertas: bool = False,
+    limite: int = 200,
+) -> list[sqlite3.Row]:
+    """Cada accion como un tramo entre la reunion donde nacio y la ultima que la menciono.
+
+    Es la lectura visual de la Fase 2 del motor: "esto lleva cinco dailys
+    abierto" se ve sin leer nada.
+
+    **Las menciones intermedias no se pueden dibujar** (D10): la base guarda un
+    contador `menciones` y la ultima reunion, no la lista de cuales la tocaron.
+    El tramo va de origen a ultima y las menciones se muestran como cifra;
+    repartir marcas por el medio seria dibujar un dato que nadie ha guardado.
+
+    Se devuelven las acciones cuyo tramo **solapa** el periodo, no solo las
+    nacidas dentro: una accion de hace dos meses que sigue abierta es justo la
+    que hay que ver al mirar esta semana.
+    """
+    condiciones, valores = [], []
+    if desde:
+        condiciones.append("COALESCE(mu.fecha, mo.fecha) >= ?")
+        valores.append(desde)
+    if hasta:
+        condiciones.append("mo.fecha <= ?")
+        valores.append(hasta)
+    if solo_abiertas:
+        condiciones.append(f"a.estado NOT IN ({_placeholders(ESTADOS_CERRADOS)})")
+        valores.extend(ESTADOS_CERRADOS)
+    where = " WHERE " + " AND ".join(condiciones) if condiciones else ""
+    return conn.execute(
+        f"""
+        SELECT a.id, a.descripcion, a.estado, a.menciones,
+               p.nombre AS persona,
+               mo.uid AS origen_uid, mo.fecha AS origen_fecha,
+               COALESCE(mu.uid, mo.uid) AS ultima_uid,
+               COALESCE(mu.fecha, mo.fecha) AS ultima_fecha,
+               (a.menciones >= ? AND a.estado NOT IN
+                    ({_placeholders(ESTADOS_CERRADOS)})) AS estancada
+          FROM actions a
+          LEFT JOIN personas p ON p.id = a.persona_id
+          JOIN meetings mo ON mo.id = a.meeting_id_origen
+          LEFT JOIN meetings mu ON mu.id = a.meeting_id_ultima
+          {where}
+         ORDER BY estancada DESC, a.menciones DESC, mo.fecha, a.id
+         LIMIT ?
+        """,
+        (UMBRAL_ESTANCAMIENTO, *ESTADOS_CERRADOS, *valores, limite),
+    ).fetchall()
 
 
 # `excluir_meeting_id` no se limita a filtrar: simula el efecto de

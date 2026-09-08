@@ -1,7 +1,7 @@
 # Plan de interfaz: de "scripts" a "memoria del equipo consultable"
 
-Redactado el 2026-09-08. **Fases D0 e I0 implementadas** (2026-09-08); el resto
-es propuesta.
+Redactado el 2026-09-08. **Fases D0, I0 e I1 implementadas** (2026-09-08); el
+resto es propuesta.
 
 Documento complementario de [`PLAN_MEJORAS.md`](PLAN_MEJORAS.md). Aquel define
 el *motor* (glosario, JSON estructurado, SQLite, arrastres, consulta en
@@ -374,6 +374,7 @@ Contrato REST, JSON, prefijo `/api`. Todos los endpoints de lectura aceptan
 | PATCH | `/api/personas/{id}` | nombre, alias, alta/baja |
 | POST | `/api/reuniones/{id}/hablantes` | corrige el mapeo etiqueta → persona |
 | GET | `/api/metricas` | los agregados de 3.2, en un solo objeto |
+| GET | `/api/timeline` | reuniones del periodo **y** carriles de acción, juntos |
 | GET | `/api/buscar?q=` | FTS5 sobre `segments`, con resaltado y contexto |
 | GET | `/api/glosario` / PUT | contenido del glosario, con validación de tamaño |
 | POST | `/api/chat` | SSE; delega en `ask_teams.py` |
@@ -577,7 +578,7 @@ pendientes de decidir, y ninguna bloquea el arranque:
 |---|---|---|---|---|
 | ~~0~~ | ~~**D0 — Deuda previa**~~ **hecha** | D1 (uid estable), D2 (remapeo de rutas), D5 (conexión de solo lectura), WAL y los primeros tests | Bajo | Nada |
 | ~~1~~ | ~~**I0 — Esqueleto**~~ **hecha** | FastAPI + Docker + `/api/salud` + `/api/reuniones` + una página que las liste | Bajo | D0 |
-| 2 | **I1 — Timeline y métricas** | 3.1 y 3.2 en SVG, filtros en la URL | Medio | I0 |
+| ~~2~~ | ~~**I1 — Timeline y métricas**~~ **hecha** | 3.1 y 3.2 en SVG, filtros en la URL | Medio | I0 |
 | 3 | **I2 — Vista de reunión** | 3.3 sin audio: resumen, secciones, transcripción | Bajo | I0 |
 | 4 | **I3 — Tablero de acciones** | 3.4 en solo lectura, con badge de estancamiento | Bajo | I0 |
 | 5 | **I4 — Búsqueda** | FTS5 con resaltado, atajo global de teclado | Bajo | I0 |
@@ -746,6 +747,74 @@ validar.
 
 ---
 
+## 9 quater. Resultado de I1 (2026-09-08)
+
+Ficheros nuevos: `api/rutas/metricas.py`, `web/js/svg.js`, `web/js/formato.js` y
+`web/js/vistas/` (`timeline.js`, `metricas.js`, `listado.js`, este último con el
+listado que estaba en `app.js`). En `memoria.py`, `metricas()` y
+`carriles_acciones()`; en `web/`, la página con tres bloques y su CSS; en
+`tests/`, 22 pruebas más (57 en total).
+
+Endpoints: `GET /api/metricas` (agregados de 3.2) y `GET /api/timeline`
+(reuniones y carriles del periodo).
+
+Decisiones y hallazgos:
+
+1. **El "zoom" son los presets de periodo, no un pan/zoom sobre el SVG.** Los
+   botones 7/30/90 días escriben `desde`/`hasta` en la URL, así que el periodo
+   mirado se puede enlazar y compartir. Un estado de vista guardado solo en
+   memoria del navegador habría contradicho el requisito de filtros en la URL.
+2. **Dos SVG que comparten la escala horizontal**: la cabecera (marcas de
+   reunión y eje) queda fija y los carriles se desplazan debajo. Con un solo
+   SVG había que elegir entre perder el eje de vista o limitar el número de
+   acciones.
+3. **Las menciones intermedias no se pueden dibujar** — deuda D10, descubierta
+   aquí. El carril va de origen a última mención y el número de veces va como
+   cifra; el criterio de aceptación (una acción con tres menciones cruzando
+   tres reuniones) se cumple igualmente gracias a las guías verticales bajo
+   cada reunión.
+4. **Un fallo real de concurrencia**: con las tres peticiones de la página en
+   paralelo, FastAPI abre la conexión en un hilo del pool y ejecuta el
+   `finally` que la cierra en otro; sqlite3 aborta con *"SQLite objects created
+   in a thread can only be used in that same thread"* y devuelve un 500. No se
+   veía en I0 porque la página hacía una sola petición. Arreglado con
+   `conectar(..., entre_hilos=True)`, que solo usa la API. **`TestClient` no lo
+   reproduce** (serializa las peticiones), así que la prueba ataca directamente
+   la dependencia desde dos hilos; se ha verificado que falla al revertir el
+   arreglo.
+5. **El panel dice el alcance de cada cifra.** Las acciones son el estado de
+   hoy del histórico completo y el resto es del periodo filtrado: una acción no
+   tiene fecha propia y recortarla al filtro habría dado un "3 abiertas" sin
+   significado. Y se respeta lo decidido en la sección 0: los riesgos son
+   "mencionados en el periodo", nunca "abiertos".
+6. **Diseñado para poco dato**, que es el estado real de la base: con menos de
+   tres semanas se muestra la tabla cruda en vez de una serie, con una sola
+   reunión el eje centra la marca, y si ninguna acción tiene más de una mención
+   se dice que aún no hay arrastres en vez de dejar un dibujo de puntos sueltos
+   que parece roto.
+7. **`UMBRAL_ESTANCAMIENTO` se ha movido a `memoria.py`**, de donde lo importa
+   `summarize_teams.py`. Si la web y el `.md` usaran umbrales distintos, la
+   misma acción saldría estancada en un sitio y no en el otro.
+
+Verificado en el navegador (lo que quedó pendiente en I0):
+
+- Contra una base de demostración de 24 reuniones y 45 acciones con arrastres:
+  carriles que cruzan varias reuniones, estancadas en ámbar, bloqueadas en
+  rojo, y el recorte de los tramos que empiezan antes del periodo.
+- Contra la base real (1 reunión, 17 acciones): estados vacíos dignos, tabla
+  cruda en vez de gráfico, aviso de que todavía no hay arrastres.
+- **Tema claro y oscuro**, y ancho de móvil (420 px), donde se prescinde de la
+  columna de descripciones. Sin errores en consola y sin desplazamiento
+  horizontal de la página.
+- Pulsar una reunión del timeline lleva a su tarjeta del listado y la resalta;
+  cuando exista la vista de reunión (I2), solo cambia el destino de esa llamada.
+
+**Pendiente, menor:** el clic de una acción lleva a la reunión de su última
+mención, que es lo mejor disponible hasta I2/I3; y el tope de 200 carriles no
+se ha probado con una base que lo supere.
+
+---
+
 ## 10. Deuda que este plan destapa en el motor
 
 Al contrastar las vistas propuestas contra el esquema real de
@@ -765,6 +834,7 @@ parchearlos en la API.
 | D7 | **No hay roster del equipo** | `personas` se puebla sola desde el LLM; `personas.activo` no lo usa nadie | "personas sin actualización" |
 | D8 | **`updates.bloqueos` es texto libre** | detectar recurrencia exige el LLM, y deja de ser un número determinista | "bloqueos recurrentes" |
 | D9 | **`duracion_seg` es NULL sin `.srt`** | sale del último `fin` de los segmentos | minutos/semana |
+| D10 | **No hay historial de menciones de una acción** | `actions` guarda el contador `menciones` y `meeting_id_ultima`, no qué reuniones la tocaron | las marcas intermedias del carril (3.1) |
 
 **D1 era el más importante y el menos evidente** (ya resuelto, ver 9 bis). Toda
 la interfaz cuelga de la URL de una reunión: enlaces guardados, vistas
@@ -772,6 +842,13 @@ filtradas compartidas por chat y, sobre todo, las citas que el chat genera para
 justificar sus respuestas. Si reprocesar una transcripción cambiara el
 identificador, todo eso apuntaría a un 404 —y las citas del chat, que son lo
 que hace fiable la Fase 4, se convertirían en enlaces rotos—.
+
+**D10 apareció al dibujar los carriles** (I1): el tramo va de la reunión de
+origen a la última que la mencionó, y las menciones del medio se muestran como
+cifra (`×3`) porque nadie guarda cuáles fueron. Repartir marcas por la barra
+sería dibujar un dato inventado. Arreglarlo es una tabla `action_mentions`
+(acción, reunión, estado, comentario) escrita por `aplicar_arrastres`, y de
+paso resolvería D4: la fecha real del cierre sería la de esa fila.
 
 **D4, D7 y D8 no bloquean nada visual**, pero invalidan tres de las métricas de
 la sección 3.2. La decisión honesta es no mostrarlas hasta que el dato exista,

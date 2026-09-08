@@ -74,6 +74,41 @@ así el token sigue siendo la única fuente.
   (`--foco`). No sustituir por `outline: none` a secas en ningún control.
 - **Radios:** `--radio` para tarjetas y avisos, `--radio-s` para controles.
 
+## Gráficos en SVG (I1)
+
+El timeline y las métricas se dibujan con `js/svg.js`, sin librería: son
+información bidimensional y en SVG salen nítidos, seleccionables y accesibles.
+Reglas propias de esta capa:
+
+1. **El color va en el CSS, no en el JS.** El SVG se construye con clases
+   (`t-daily`, `e-en_progreso`, `estancada`) y `estilo.css` las pinta con
+   `fill`/`stroke` sobre los mismos tokens. Ningún `setAttribute("fill", …)`.
+2. **Los tipos de reunión repiten los colores de la insignia** del listado, y
+   los estados de acción siguen la escala de esta guía: azul en curso, ámbar
+   pendiente o estancado, rojo bloqueado, verde cerrado, gris apagado lo
+   abandonado. La leyenda bajo el timeline reutiliza esas mismas clases, pero
+   en HTML el color se aplica con `color` (el `fill` no afecta a un `<i>`).
+3. **Toda forma lleva `<title>`**: es el tooltip nativo y lo que leen los
+   lectores de pantalla. Lo que solo se ve al pasar el ratón no puede ser la
+   única forma de acceder a un dato.
+4. **Las medidas van en píxeles reales**, no en unidades relativas, para que el
+   texto no se deforme; por eso el dibujo se rehace en `resize` y hay que
+   descontar el relleno del contenedor al medirlo (`clientWidth` lo incluye, y
+   sin restarlo aparece una barra de desplazamiento horizontal).
+5. **Nada de zoom ni pan propios.** El periodo se cambia con los botones de la
+   barra de filtros, que escriben `desde`/`hasta` en la URL: un estado de vista
+   que no se puede enlazar no vale para compartir.
+
+## Decir lo que el dato soporta
+
+La interfaz no promete más de lo que hay en la base: los riesgos son
+«mencionados en el periodo» y nunca «abiertos», los cierres por semana llevan
+su advertencia sobre `cerrada_en`, y las reuniones sin duración se cuentan
+aparte en vez de sumar cero en silencio. Con menos de tres semanas de datos no
+se dibuja una serie: se muestra la tabla cruda. Al añadir una métrica, decir
+también su alcance —histórico completo o periodo filtrado—, que es lo que
+separa un número útil de uno que nadie sabe interpretar.
+
 ## Conmutador de tema
 
 Un solo botón en la cabecera con tres estados de hecho:

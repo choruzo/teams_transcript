@@ -268,5 +268,205 @@ class TestArrastresSiguenBien(BaseTemporal):
         self.assertEqual(estado_2["estado"], "bloqueada")
 
 
+class TestMetricas(BaseTemporal):
+    """I1: los agregados del panel de salud, que salen de SQL y no del LLM."""
+
+    def poblar(self, conn):
+        # Dos semanas ISO distintas, una reunion sin duracion (D9) y una accion
+        # arrastrada tres veces, que es el caso que la interfaz llama estancada.
+        uno = self.crear(
+            conn, "/datos/dia1.txt", fecha="2026-09-01", duracion_seg=1800
+        )
+        memoria.insertar_acciones(
+            conn,
+            uno,
+            [
+                {"descripcion": "Arrastrada", "persona": "Lara"},
+                {"descripcion": "Suelta", "persona": "Pedro"},
+            ],
+        )
+        memoria.insertar_riesgos(
+            conn,
+            uno,
+            [
+                {"descripcion": "R1", "area": "ULS", "severidad": "alta"},
+                {"descripcion": "R2", "area": "", "severidad": "media"},
+            ],
+        )
+        memoria.insertar_updates(
+            conn, uno, [{"persona": "Lara", "trabajo": "algo"}]
+        )
+        dos = self.crear(conn, "/datos/dia2.txt", fecha="2026-09-08")
+        tres = self.crear(
+            conn, "/datos/dia3.txt", fecha="2026-09-09", duracion_seg=600
+        )
+        arrastrada = conn.execute(
+            "SELECT id FROM actions WHERE descripcion = 'Arrastrada'"
+        ).fetchone()["id"]
+        for meeting_id in (dos, tres):
+            memoria.aplicar_arrastres(
+                conn, meeting_id, [{"action_id": arrastrada, "estado": "bloqueada"}]
+            )
+        conn.commit()
+        return arrastrada
+
+    def test_alcance_de_cada_bloque(self):
+        """Las acciones son de hoy y de todo el historico; el resto, del periodo."""
+        conn = self.conectar()
+        self.poblar(conn)
+        recorte = memoria.metricas(conn, desde="2026-09-08", hasta="2026-09-09")
+        self.assertEqual(recorte["reuniones"], 2, "las reuniones si se filtran")
+        self.assertEqual(
+            recorte["acciones_abiertas"], 2, "las acciones no dependen del periodo"
+        )
+        self.assertEqual(recorte["riesgos"]["total"], 0, "los riesgos si")
+
+    def test_estancadas_usan_el_umbral_compartido(self):
+        conn = self.conectar()
+        self.poblar(conn)
+        datos = memoria.metricas(conn)
+        self.assertEqual(datos["umbral_estancamiento"], memoria.UMBRAL_ESTANCAMIENTO)
+        self.assertEqual(datos["estancadas"], 1, "3 menciones sin cerrar")
+        self.assertEqual(datos["acciones"]["bloqueada"], 1)
+        self.assertEqual(datos["acciones"]["abierta"], 1)
+
+    def test_semanas_iso_y_duracion_desconocida(self):
+        conn = self.conectar()
+        self.poblar(conn)
+        datos = memoria.metricas(conn)
+        semanas = {s["semana"]: s for s in datos["semanas"]}
+        self.assertEqual(sorted(semanas), ["2026-W36", "2026-W37"])
+        self.assertEqual(semanas["2026-W36"]["minutos"], 30)
+        # D9: la reunion sin duracion se cuenta aparte en vez de sumar cero en
+        # silencio, para que la interfaz pueda advertirlo.
+        self.assertEqual(datos["reuniones_sin_duracion"], 1)
+        self.assertEqual(semanas["2026-W37"]["sin_duracion"], 1)
+        self.assertEqual(semanas["2026-W37"]["minutos"], 10)
+
+    def test_riesgos_agrupados_sin_hablar_de_abiertos(self):
+        conn = self.conectar()
+        self.poblar(conn)
+        riesgos = memoria.metricas(conn)["riesgos"]
+        self.assertEqual(riesgos["total"], 2)
+        self.assertEqual(riesgos["por_severidad"], {"alta": 1, "media": 1})
+        self.assertIn({"area": "ULS", "n": 1}, riesgos["por_area"])
+        self.assertIn({"area": "sin área", "n": 1}, riesgos["por_area"])
+
+    def test_personas_sin_actividad_no_aparecen(self):
+        conn = self.conectar()
+        self.poblar(conn)
+        memoria.obtener_o_crear_persona(conn, "Fantasma")
+        conn.commit()
+        nombres = [p["persona"] for p in memoria.metricas(conn)["personas"]]
+        self.assertIn("Lara", nombres)
+        self.assertNotIn("Fantasma", nombres, "sin roster (D7) no se inventa gente")
+
+    def test_base_vacia_no_revienta(self):
+        """El estado inicial de un despliegue nuevo es una base sin nada."""
+        datos = memoria.metricas(self.conectar())
+        self.assertEqual(datos["reuniones"], 0)
+        self.assertEqual(datos["acciones_abiertas"], 0)
+        self.assertEqual(datos["semanas"], [])
+        self.assertEqual(datos["riesgos"]["total"], 0)
+
+
+class TestCarriles(BaseTemporal):
+    """I1: cada accion como un tramo entre su origen y su ultima mencion."""
+
+    def preparar(self, conn):
+        uno = self.crear(conn, "/datos/dia1.txt", fecha="2026-09-01")
+        memoria.insertar_acciones(
+            conn, uno, [{"descripcion": "Arrastrada", "persona": "Lara"}]
+        )
+        accion = conn.execute("SELECT id FROM actions").fetchone()["id"]
+        for fecha in ("2026-09-02", "2026-09-03"):
+            otra = self.crear(conn, f"/datos/{fecha}.txt", fecha=fecha)
+            memoria.aplicar_arrastres(
+                conn, otra, [{"action_id": accion, "estado": "en_progreso"}]
+            )
+        conn.commit()
+        return accion
+
+    def test_tramo_de_origen_a_ultima_mencion(self):
+        conn = self.conectar()
+        self.preparar(conn)
+        carril = memoria.carriles_acciones(conn)[0]
+        self.assertEqual(carril["origen_fecha"], "2026-09-01")
+        self.assertEqual(carril["ultima_fecha"], "2026-09-03")
+        self.assertEqual(carril["menciones"], 3)
+        self.assertTrue(carril["estancada"])
+        self.assertEqual(carril["persona"], "Lara")
+
+    def test_una_accion_sin_arrastres_es_un_punto(self):
+        conn = self.conectar()
+        meeting_id = self.crear(conn, "/datos/solo.txt", fecha="2026-09-01")
+        memoria.insertar_acciones(conn, meeting_id, [{"descripcion": "Sola"}])
+        conn.commit()
+        carril = memoria.carriles_acciones(conn)[0]
+        self.assertEqual(carril["origen_fecha"], carril["ultima_fecha"])
+        self.assertFalse(carril["estancada"])
+
+    def test_se_devuelven_las_que_solapan_el_periodo(self):
+        """Una accion vieja que sigue viva es justo la que hay que ver hoy."""
+        conn = self.conectar()
+        self.preparar(conn)
+        dentro = memoria.carriles_acciones(conn, desde="2026-09-03")
+        self.assertEqual(len(dentro), 1, "nacio antes, pero llega hasta aqui")
+        fuera = memoria.carriles_acciones(conn, desde="2026-09-04")
+        self.assertEqual(fuera, [])
+
+    def test_solo_abiertas_excluye_las_cerradas(self):
+        conn = self.conectar()
+        accion = self.preparar(conn)
+        cierre = self.crear(conn, "/datos/cierre.txt", fecha="2026-09-04")
+        memoria.aplicar_arrastres(
+            conn, cierre, [{"action_id": accion, "estado": "completada"}]
+        )
+        conn.commit()
+        self.assertEqual(len(memoria.carriles_acciones(conn)), 1)
+        self.assertEqual(memoria.carriles_acciones(conn, solo_abiertas=True), [])
+
+
+class TestConexionEntreHilos(BaseTemporal):
+    """La API abre en un hilo del pool y puede cerrar en otro."""
+
+    def test_cerrar_desde_otro_hilo(self):
+        import threading
+
+        memoria.conectar(self.db).close()  # crear el fichero
+        conn = memoria.conectar(self.db, solo_lectura=True, entre_hilos=True)
+        fallo = []
+
+        def usar_y_cerrar():
+            try:
+                conn.execute("SELECT count(*) FROM meetings").fetchone()
+                conn.close()
+            except Exception as exc:  # noqa: BLE001
+                fallo.append(exc)
+
+        hilo = threading.Thread(target=usar_y_cerrar)
+        hilo.start()
+        hilo.join()
+        self.assertEqual(fallo, [], "sin entre_hilos esto aborta con ProgrammingError")
+
+    def test_por_defecto_sigue_comprobando_el_hilo(self):
+        """El pipeline no lo necesita y la comprobacion es una red de seguridad."""
+        import threading
+
+        conn = self.conectar()
+        fallo = []
+
+        def usar():
+            try:
+                conn.execute("SELECT 1")
+            except Exception as exc:  # noqa: BLE001
+                fallo.append(exc)
+
+        hilo = threading.Thread(target=usar)
+        hilo.start()
+        hilo.join()
+        self.assertIsInstance(fallo[0], sqlite3.ProgrammingError)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

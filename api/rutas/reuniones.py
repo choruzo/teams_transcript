@@ -16,7 +16,8 @@ router = APIRouter(prefix="/reuniones", tags=["reuniones"])
 _FECHA = r"^\d{4}-\d{2}-\d{2}$"
 
 
-def _a_modelo(fila: sqlite3.Row) -> Reunion:
+def a_modelo(fila: sqlite3.Row) -> Reunion:
+    """Fila de `listar_reuniones` -> contrato publico. Lo comparte el timeline."""
     return Reunion(
         uid=fila["uid"],
         fecha=fila["fecha"],
@@ -56,7 +57,7 @@ def listar(
         total=memoria.contar_reuniones(conn, **filtros),
         limite=limite,
         desplazamiento=desplazamiento,
-        reuniones=[_a_modelo(f) for f in filas],
+        reuniones=[a_modelo(f) for f in filas],
     )
 
 
@@ -73,4 +74,4 @@ def obtener(uid: str, conn: sqlite3.Connection = Depends(conexion)) -> Reunion:
         raise HTTPException(
             status_code=404, detail=f"No hay ninguna reunion con uid {uid!r}"
         )
-    return _a_modelo(filas[0])
+    return a_modelo(filas[0])

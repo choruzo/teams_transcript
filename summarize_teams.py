@@ -354,7 +354,9 @@ def _lista_de_textos(valor) -> list[str]:
     return [str(item).strip() for item in valor if str(item).strip()]
 
 
-UMBRAL_ESTANCAMIENTO = 3
+# El umbral vive en memoria.py: la interfaz web lo necesita para marcar las
+# mismas acciones que marca la seccion "Arrastres" del .md.
+UMBRAL_ESTANCAMIENTO = memoria.UMBRAL_ESTANCAMIENTO
 
 
 def normalizar(

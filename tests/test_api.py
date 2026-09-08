@@ -206,13 +206,175 @@ class TestSoloLecturaDeVerdad(BaseAPI):
             conn.close()
 
 
+class TestMetricasYTimeline(BaseAPI):
+    """Fase I1. Lo que se comprueba aqui es el contrato, no la aritmetica:
+    los agregados ya tienen sus pruebas en test_memoria.py."""
+
+    def poblar_con_arrastre(self):
+        conn = memoria.conectar(self.db)
+        primera = memoria.crear_reunion(
+            conn,
+            fecha="2026-09-01",
+            titulo="Daily 1",
+            duracion_seg=1200,
+            transcript_path="/datos/20260901_090000_mixed.txt",
+        )
+        memoria.insertar_acciones(
+            conn, primera, [{"descripcion": "Arrastrada", "persona": "Lara"}]
+        )
+        memoria.insertar_riesgos(
+            conn, primera, [{"descripcion": "R", "area": "ULS", "severidad": "alta"}]
+        )
+        accion = conn.execute("SELECT id FROM actions").fetchone()["id"]
+        for fecha in ("2026-09-02", "2026-09-03"):
+            otra = memoria.crear_reunion(
+                conn,
+                fecha=fecha,
+                tipo="retro",
+                transcript_path=f"/datos/{fecha}.txt",
+            )
+            memoria.aplicar_arrastres(
+                conn, otra, [{"action_id": accion, "estado": "en_progreso"}]
+            )
+        conn.commit()
+        conn.close()
+
+    def test_metricas_devuelve_el_objeto_completo(self):
+        self.poblar_con_arrastre()
+        datos = self.cliente.get("/api/metricas").json()
+        self.assertEqual(datos["reuniones"], 3)
+        self.assertEqual(datos["acciones_abiertas"], 1)
+        self.assertEqual(datos["estancadas"], 1)
+        self.assertEqual(datos["riesgos"]["por_severidad"], {"alta": 1})
+        self.assertEqual(datos["umbral_estancamiento"], memoria.UMBRAL_ESTANCAMIENTO)
+        self.assertEqual([p["persona"] for p in datos["personas"]], ["Lara"])
+
+    def test_metricas_respeta_el_periodo(self):
+        self.poblar_con_arrastre()
+        datos = self.cliente.get("/api/metricas?desde=2026-09-02").json()
+        self.assertEqual(datos["reuniones"], 2)
+        self.assertEqual(datos["desde"], "2026-09-02")
+        self.assertEqual(datos["riesgos"]["total"], 0, "el riesgo es del dia 1")
+
+    def test_timeline_ordena_de_antiguo_a_reciente(self):
+        """Al reves que el listado: el eje se dibuja de izquierda a derecha."""
+        self.poblar_con_arrastre()
+        datos = self.cliente.get("/api/timeline").json()
+        self.assertEqual(
+            [r["fecha"] for r in datos["reuniones"]],
+            ["2026-09-01", "2026-09-02", "2026-09-03"],
+        )
+        self.assertEqual(datos["total_reuniones"], 3)
+        self.assertFalse(datos["truncado"])
+
+    def test_carril_con_su_tramo(self):
+        self.poblar_con_arrastre()
+        carril = self.cliente.get("/api/timeline").json()["carriles"][0]
+        self.assertEqual(carril["origen_fecha"], "2026-09-01")
+        self.assertEqual(carril["ultima_fecha"], "2026-09-03")
+        self.assertEqual(carril["menciones"], 3)
+        self.assertTrue(carril["estancada"])
+        # Los extremos se direccionan por uid, nunca por id: el enlace tiene
+        # que seguir funcionando despues de reprocesar.
+        self.assertEqual(carril["origen_uid"], "20260901_090000_mixed")
+
+    def test_solo_abiertas_por_defecto(self):
+        self.poblar_con_arrastre()
+        conn = memoria.conectar(self.db)
+        accion = conn.execute("SELECT id FROM actions").fetchone()["id"]
+        cierre = memoria.crear_reunion(
+            conn, fecha="2026-09-04", transcript_path="/datos/cierre.txt"
+        )
+        memoria.aplicar_arrastres(
+            conn, cierre, [{"action_id": accion, "estado": "completada"}]
+        )
+        conn.commit()
+        conn.close()
+        self.assertEqual(self.cliente.get("/api/timeline").json()["carriles"], [])
+        con_cerradas = self.cliente.get("/api/timeline?solo_abiertas=false").json()
+        self.assertEqual(len(con_cerradas["carriles"]), 1)
+
+    def test_filtros_invalidos_dan_422(self):
+        self.poblar_con_arrastre()
+        self.assertEqual(
+            self.cliente.get("/api/timeline?tipo=inventado").status_code, 422
+        )
+        self.assertEqual(self.cliente.get("/api/metricas?hasta=ayer").status_code, 422)
+
+    def test_base_vacia_responde_200(self):
+        """Un despliegue nuevo no puede recibir un error por no tener datos."""
+        memoria.conectar(self.db).close()
+        self.assertEqual(self.cliente.get("/api/metricas").status_code, 200)
+        datos = self.cliente.get("/api/timeline").json()
+        self.assertEqual(datos["reuniones"], [])
+        self.assertEqual(datos["carriles"], [])
+
+    def test_esquema_atrasado_da_503_tambien_aqui(self):
+        self.poblar_con_arrastre()
+        cru = sqlite3.connect(self.db)
+        cru.execute("PRAGMA user_version = 1")
+        cru.commit()
+        cru.close()
+        for ruta in ("/api/metricas", "/api/timeline"):
+            with self.subTest(ruta=ruta):
+                respuesta = self.cliente.get(ruta)
+                self.assertEqual(respuesta.status_code, 503)
+                self.assertIn("--migrar", respuesta.json()["detail"])
+
+
+class TestConexionPorPeticion(BaseAPI):
+    def test_se_puede_cerrar_en_otro_hilo(self):
+        """FastAPI abre la conexion en un hilo del pool y la cierra en otro.
+
+        Con varias peticiones a la vez -- la pagina lanza tres -- el `finally`
+        de `deps.conexion` cae en un hilo distinto del que la abrio, y sin
+        `entre_hilos=True` sqlite3 aborta con "SQLite objects created in a
+        thread can only be used in that same thread". Paso de verdad al montar
+        esta fase, y no se reproduce con TestClient porque serializa las
+        peticiones; por eso la prueba ataca la dependencia directamente.
+        """
+        import threading
+
+        from api.deps import conexion
+
+        self.poblar()
+        generador = conexion()
+        conn = next(generador)
+        conn.execute("SELECT count(*) FROM meetings").fetchone()
+
+        fallo = []
+
+        def cerrar():
+            try:
+                next(generador, None)  # ejecuta el finally: conn.close()
+            except Exception as exc:  # noqa: BLE001
+                fallo.append(exc)
+
+        hilo = threading.Thread(target=cerrar)
+        hilo.start()
+        hilo.join()
+        self.assertEqual(fallo, [], "la conexion debe poder cerrarse en otro hilo")
+
+    def test_la_pagina_pide_las_tres_cosas_sin_error(self):
+        self.poblar()
+        for ruta in ("/api/timeline", "/api/metricas", "/api/reuniones"):
+            with self.subTest(ruta=ruta):
+                self.assertEqual(self.cliente.get(ruta).status_code, 200)
+
+
 class TestFrontEstatico(BaseAPI):
     def test_sirve_la_pagina_y_sus_recursos(self):
         for ruta, tipo in [
             ("/", "text/html"),
             ("/js/app.js", "javascript"),
             ("/js/api.js", "javascript"),
+            ("/js/svg.js", "javascript"),
+            ("/js/formato.js", "javascript"),
+            ("/js/vistas/timeline.js", "javascript"),
+            ("/js/vistas/metricas.js", "javascript"),
+            ("/js/vistas/listado.js", "javascript"),
             ("/css/estilo.css", "text/css"),
+            ("/css/tokens.css", "text/css"),
         ]:
             with self.subTest(ruta=ruta):
                 respuesta = self.cliente.get(ruta)

@@ -61,11 +61,47 @@
       </div>
       <button type="submit">Filtrar</button>
       <button type="button" id="limpiar">Limpiar</button>
-      <span id="total"></span>
+
+      <!-- El "zoom" del timeline. No es un estado aparte: cada boton escribe
+           desde/hasta en la URL, para que el periodo mirado se pueda enlazar. -->
+      <div class="periodos" role="group" aria-label="Periodo">
+        <button type="button" data-dias="7" aria-pressed="false">7 días</button>
+        <button type="button" data-dias="30" aria-pressed="false">30 días</button>
+        <button type="button" data-dias="90" aria-pressed="false">90 días</button>
+        <button type="button" data-dias="" aria-pressed="false">Todo</button>
+      </div>
     </form>
 
-    <section id="listado">
-      <div class="aviso">Cargando…</div>
+    <section class="bloque" aria-labelledby="t-timeline">
+      <h2 id="t-timeline">Reuniones y acciones</h2>
+      <p class="nota">Cada marca es una reunión, con la altura proporcional a su
+        duración. Debajo, cada acción abierta como un tramo entre la reunión
+        donde nació y la última que la mencionó.</p>
+      <div id="timeline" class="timeline">
+        <div class="aviso">Cargando…</div>
+      </div>
+      <ul class="leyenda">
+        <li><i class="m t-daily"></i>daily</li>
+        <li><i class="m t-workshop"></i>workshop</li>
+        <li><i class="m t-retro"></i>retro</li>
+        <li><i class="m t-planning"></i>planning</li>
+        <li><i class="b e-abierta"></i>abierta</li>
+        <li><i class="b e-en_progreso"></i>en progreso</li>
+        <li><i class="b e-bloqueada"></i>bloqueada</li>
+        <li><i class="b estancada"></i>estancada</li>
+      </ul>
+    </section>
+
+    <section class="bloque" aria-labelledby="t-metricas">
+      <h2 id="t-metricas">Salud del equipo</h2>
+      <div id="metricas"></div>
+    </section>
+
+    <section class="bloque" aria-labelledby="t-listado">
+      <h2 id="t-listado">Histórico <span id="total"></span></h2>
+      <div id="listado">
+        <div class="aviso">Cargando…</div>
+      </div>
     </section>
   </main>
 

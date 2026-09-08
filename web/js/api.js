@@ -42,4 +42,8 @@ export const api = {
   salud: () => pedir("/salud"),
   reuniones: (filtros) => pedir("/reuniones", filtros),
   reunion: (uid) => pedir(`/reuniones/${encodeURIComponent(uid)}`),
+  metricas: (filtros) => pedir("/metricas", filtros),
+  // El timeline pide reuniones y carriles juntos: se dibujan sobre el mismo
+  // eje y en dos peticiones habria un instante con la mitad del dibujo.
+  timeline: (filtros) => pedir("/timeline", filtros),
 };

@@ -198,13 +198,6 @@ button {
   border-color: var(--verde2);
 }
 
-/* El contador de resultados se alinea al final de la barra de filtros. */
-#total {
-  margin-left: auto;
-  color: var(--dim);
-  font-size: 0.8rem;
-}
-
 /* --- Reuniones --- */
 
 .reunion {
@@ -342,3 +335,430 @@ footer {
 
 footer .mal { color: var(--rojo); }
 footer .bien { color: var(--verde); }
+
+/* ==========================================================================
+   I1: timeline, métricas y sus gráficos
+   ========================================================================== */
+
+.bloque { margin-bottom: 2rem; }
+
+.bloque > h2 {
+  margin: 0 0 0.25rem;
+  font-size: 0.95rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--dim);
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+
+/* El contador de resultados acompaña al título de su sección. */
+#total {
+  margin-left: auto;
+  font-size: 0.78rem;
+  text-transform: none;
+  letter-spacing: 0;
+  font-family: var(--mono);
+}
+
+.nota {
+  margin: 0.35rem 0 0.8rem;
+  color: var(--dim);
+  font-size: 0.8rem;
+  max-width: 46rem;
+}
+
+.nota code { font-family: var(--mono); font-size: 0.95em; }
+
+/* Grupo de periodos: un solo control segmentado, no cuatro botones sueltos.
+   El activo se marca con aria-pressed y no con una clase, para que el estado
+   lo sepa también quien no ve el color. */
+.periodos {
+  display: flex;
+  margin-left: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radio-s);
+  overflow: hidden;
+}
+
+.filtros .periodos button {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--dim);
+  padding: 0.42rem 0.7rem;
+  font-size: 0.82rem;
+}
+
+.filtros .periodos button + button { border-left: 1px solid var(--line); }
+
+.filtros .periodos button:hover { color: var(--text); background: var(--panel2); }
+
+.filtros .periodos button[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--verde2) 22%, var(--panel));
+  color: var(--verde);
+}
+
+/* --- Timeline --- */
+
+.timeline {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radio);
+  padding: 0.6rem 0.75rem 0.8rem;
+}
+
+/* La cabecera con el eje se queda quieta mientras se recorren los carriles:
+   sin ella, una barra a mitad de lista no se puede situar en el tiempo. */
+.tl-fija {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.tl-scroll {
+  max-height: 24rem;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.timeline svg { display: block; }
+
+.tl-eje { stroke: var(--line); stroke-width: 1; }
+
+/* Guías verticales bajo cada reunión: son lo que hace visible que una acción
+   cruza tres dailys. Muy tenues a propósito: son referencia, no dato. */
+.tl-guia {
+  stroke: var(--line);
+  stroke-width: 1;
+  stroke-dasharray: 2 4;
+}
+
+.tl-fecha,
+.tl-etiqueta,
+.tl-menciones {
+  fill: var(--dim);
+  font-size: 11px;
+  font-family: var(--fuente);
+}
+
+.tl-etiqueta { fill: var(--text); font-size: 11.5px; }
+
+.tl-menciones { font-family: var(--mono); font-size: 10px; }
+
+.tl-reunion,
+.tl-carril { cursor: pointer; }
+
+.tl-reunion:focus-visible,
+.tl-carril:focus-visible { outline: none; }
+
+.tl-reunion:focus-visible .tl-marca,
+.tl-carril:focus-visible .tl-barra {
+  stroke: var(--verde);
+  stroke-width: 2;
+}
+
+.tl-marca { transition: opacity 0.15s; }
+.tl-reunion:hover .tl-marca { opacity: 0.75; }
+
+/* Sin duración conocida (D9) la marca sale con la altura mínima; se atenúa
+   para que no se confunda con una reunión cortísima. */
+.tl-reunion.sin-duracion .tl-marca { opacity: 0.45; }
+
+/* Un color por tipo, los mismos de la insignia del listado. */
+.t-daily { fill: var(--verde); }
+.t-planning { fill: var(--azul); }
+.t-retro { fill: var(--ambar); }
+.t-workshop { fill: var(--dim); }
+
+/* Estado de la acción con la escala de ESTILO.md: azul en curso, ámbar
+   pendiente, rojo bloqueado, verde cerrado. */
+.tl-barra { fill: var(--dim); }
+.e-abierta .tl-barra { fill: color-mix(in srgb, var(--dim) 70%, var(--text)); }
+.e-en_progreso .tl-barra { fill: var(--azul); }
+.e-bloqueada .tl-barra { fill: var(--rojo); }
+.e-completada .tl-barra { fill: var(--verde); }
+.e-abandonada .tl-barra { fill: color-mix(in srgb, var(--dim) 60%, transparent); }
+
+.estancada .tl-barra {
+  fill: var(--ambar);
+  stroke: color-mix(in srgb, var(--ambar) 55%, transparent);
+  stroke-width: 3;
+}
+
+/* Los extremos toman el color del carril con currentColor: el punto dice
+   dónde nació y dónde se mencionó por última vez. Un extremo sin punto es un
+   tramo recortado por el periodo, que sigue fuera de la vista. */
+.tl-carril { color: var(--dim); }
+.tl-nodo { fill: var(--panel); stroke: currentColor; stroke-width: 2; }
+.e-en_progreso { color: var(--azul); }
+.e-bloqueada { color: var(--rojo); }
+.e-completada { color: var(--verde); }
+.estancada { color: var(--ambar); }
+
+.tl-carril:hover .tl-barra { filter: brightness(1.25); }
+
+.tl-vacio {
+  margin: 0.6rem 0 0;
+  color: var(--dim);
+  font-size: 0.82rem;
+}
+
+.leyenda {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1rem;
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  font-size: 0.75rem;
+  color: var(--dim);
+}
+
+.leyenda li { display: flex; align-items: center; gap: 0.35rem; }
+
+.leyenda i {
+  display: inline-block;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+/* La leyenda reutiliza las clases del SVG, donde el color se aplica con
+   `fill`; en HTML hace falta `color` para que `currentColor` funcione. */
+.leyenda .m { width: 6px; height: 14px; }
+.leyenda .b { width: 16px; height: 8px; border-radius: 4px; }
+.leyenda .t-daily { color: var(--verde); }
+.leyenda .t-planning { color: var(--azul); }
+.leyenda .t-retro { color: var(--ambar); }
+.leyenda .t-workshop { color: var(--dim); }
+.leyenda .e-abierta { color: color-mix(in srgb, var(--dim) 70%, var(--text)); }
+
+/* --- Métricas --- */
+
+.alertas {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.alertas li {
+  padding: 0.55rem 0.8rem;
+  border-radius: var(--radio-s);
+  font-size: 0.85rem;
+  border: 1px solid;
+}
+
+.alertas .mal {
+  border-color: color-mix(in srgb, var(--ambar) 45%, transparent);
+  background: color-mix(in srgb, var(--ambar) 10%, var(--panel));
+  color: var(--text);
+}
+
+/* Aviso sobre la calidad del dato, no sobre el equipo: más apagado que una
+   alerta de verdad para que no compitan. */
+.alertas .aviso {
+  border-color: var(--line);
+  background: var(--panel);
+  color: var(--dim);
+  text-align: left;
+  padding: 0.55rem 0.8rem;
+}
+
+.cifras-grandes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.6rem;
+}
+
+.cifra {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radio);
+  padding: 0.7rem 0.9rem;
+}
+
+.cifra b {
+  display: block;
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.cifra span { font-size: 0.76rem; color: var(--dim); }
+
+.cifra.mal b { color: var(--ambar); }
+.cifra.apagada b { color: var(--dim); }
+
+.paneles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.9rem;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radio);
+  padding: 0.85rem 1rem 1rem;
+  min-width: 0;
+}
+
+.panel h3 {
+  margin: 0 0 0.6rem;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--dim);
+}
+
+.grafico { display: block; width: 100%; }
+
+.g-rejilla { stroke: var(--line); stroke-width: 1; }
+
+.g-tick { fill: var(--dim); font-size: 10px; font-family: var(--fuente); }
+
+.g-barra rect { fill: color-mix(in srgb, var(--verde2) 75%, transparent); }
+.g-barra:hover rect { fill: var(--verde); }
+
+.g-cierres { fill: var(--panel); stroke: var(--verde); stroke-width: 2; }
+
+.g-cierres-n { fill: var(--verde); font-size: 9px; font-family: var(--mono); }
+
+.tabla-cruda table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.tabla-cruda th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--dim);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--line);
+  padding: 0.25rem 0.4rem;
+}
+
+.tabla-cruda td {
+  padding: 0.3rem 0.4rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+
+.tabla-cruda td:not(:first-child) { font-family: var(--mono); }
+
+.barras {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.barras li {
+  display: grid;
+  grid-template-columns: 6.5rem 1fr auto;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+}
+
+.barras .nombre {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.barras .barra {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--panel2);
+  overflow: hidden;
+}
+
+.barras .barra i {
+  display: block;
+  height: 100%;
+  background: var(--verde2);
+  border-radius: 4px;
+}
+
+.barras .valor {
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  white-space: nowrap;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.6rem;
+}
+
+.chip {
+  font-size: 0.75rem;
+  padding: 0.12rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel2);
+  color: var(--dim);
+}
+
+.chip.s-alta {
+  color: var(--rojo);
+  border-color: color-mix(in srgb, var(--rojo) 45%, transparent);
+}
+
+.chip.s-media {
+  color: var(--ambar);
+  border-color: color-mix(in srgb, var(--ambar) 45%, transparent);
+}
+
+.chip.s-baja {
+  color: var(--azul);
+  border-color: color-mix(in srgb, var(--azul) 40%, transparent);
+}
+
+.areas {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.82rem;
+}
+
+.areas li {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.22rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+
+.areas b { font-family: var(--mono); font-weight: 600; }
+
+/* Tarjeta señalada desde el timeline. El destello dura lo justo para que la
+   vista sepa dónde ha aterrizado y no deja un estado permanente que luego
+   haya que limpiar. */
+.reunion.señalada { animation: destello 1.4s ease-out; }
+
+@keyframes destello {
+  from {
+    border-color: var(--verde);
+    background: color-mix(in srgb, var(--verde) 12%, var(--panel));
+  }
+  to { border-color: var(--line); background: var(--panel); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reunion.señalada { animation: none; border-color: var(--verde); }
+}
