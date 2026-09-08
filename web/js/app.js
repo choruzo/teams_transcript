@@ -3,6 +3,7 @@
 // pueda guardar en marcadores o pasar por chat.
 
 import { api } from "./api.js";
+import { iniciarTema } from "./tema.js";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -60,7 +61,7 @@ function tarjeta(reunion) {
     <article class="reunion">
       <div class="reunion-cabecera">
         <h2>${escapar(reunion.titulo || reunion.fecha)}</h2>
-        <span class="etiqueta">${escapar(reunion.tipo)}</span>
+        <span class="etiqueta" data-tipo="${escapar(reunion.tipo)}">${escapar(reunion.tipo)}</span>
       </div>
       <div class="uid">${escapar(reunion.fecha)} · ${escapar(reunion.uid)}</div>
       ${reunion.resumen ? `<p class="resumen">${escapar(reunion.resumen)}</p>` : ""}
@@ -147,5 +148,6 @@ $("#limpiar").addEventListener("click", () => {
   cargar();
 });
 
+iniciarTema();
 cargar();
 pintarSalud();

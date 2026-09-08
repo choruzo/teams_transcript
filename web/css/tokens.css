@@ -1,0 +1,91 @@
+/* Contrato visual de la interfaz. Esta hoja es la UNICA que define colores:
+   el resto del CSS y cualquier vista futura usan estas variables y nunca un
+   valor literal. Si algo necesita un color que no esta aqui, se anade aqui.
+
+   Dos temas con los MISMOS nombres de token y el mismo significado, para que
+   ningun componente tenga que saber en cual esta:
+
+     :root                    -> oscuro (el tema por defecto)
+     :root[data-tema="claro"] -> claro
+
+   El atributo lo pone js/tema.js en <html> a partir de lo guardado por el
+   usuario o, si no ha elegido, de prefers-color-scheme. Se hace por atributo y
+   no con un @media para no tener que escribir dos veces el bloque claro (una
+   para la preferencia del sistema y otra para el conmutador) y arriesgarse a
+   que diverjan. Sin JavaScript queda el oscuro, que es un degradado sensato:
+   la pagina ya necesita JS para pintar el listado. */
+
+:root {
+  color-scheme: dark;
+
+  /* --- Superficies --- */
+  --bg: #0a1214;      /* fondo de pagina */
+  --panel: #0f1b1e;   /* tarjetas, tablas, cabecera */
+  --panel2: #122226;  /* hover de filas, campos de formulario, insignia neutra */
+  --line: #1b3237;    /* bordes y separadores */
+
+  /* --- Texto --- */
+  --text: #cfe3de;    /* texto principal */
+  --dim: #6f8b86;     /* metadatos, etiquetas, texto secundario */
+
+  /* --- Acentos --- */
+  --verde: #34d399;   /* acento primario, exito, marca */
+  --verde2: #0d9488;  /* verde de superficie: boton primario, borde de enfasis */
+  --azul: #38bdf8;    /* enlaces, informacion, "en curso" */
+  --azul2: #155e75;   /* fondo de insignia informativa, borde de citas */
+  --ambar: #e8b545;   /* advertencia, INCONCLUSO, pendiente de revision */
+  --rojo: #e77070;    /* error, FAIL */
+
+  /* Texto sobre una superficie de acento (--verde2 y compania). No es
+     var(--text): sobre el boton primario hace falta el contrario del tema. */
+  --sobre-acento: var(--bg);
+
+  /* Halos del fondo. Van aqui y no en estilo.css porque llevan color. */
+  --halos:
+    radial-gradient(60rem 30rem at 15% -10%, rgba(13, 148, 136, 0.14), transparent 70%),
+    radial-gradient(45rem 25rem at 95% 0%, rgba(21, 94, 117, 0.16), transparent 70%);
+
+  --sombra: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --foco: 0 0 0 2px rgba(52, 211, 153, 0.35);
+
+  /* --- Forma y ritmo (iguales en los dos temas) --- */
+  --radio: 10px;      /* tarjetas y avisos */
+  --radio-s: 6px;     /* controles */
+
+  /* Tipografia: solo fuentes del sistema. El servidor no tiene internet y no
+     se van a empaquetar ficheros de fuentes por una interfaz interna. */
+  --fuente: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+
+/* Tema claro: la misma familia teal/verde, no un gris neutro, para que las dos
+   caras se reconozcan como la misma herramienta. Los acentos NO son los del
+   oscuro: #34d399 sobre blanco se queda en 1.7:1 y es ilegible, asi que cada
+   uno se oscurece hasta pasar de 4.5:1 sobre --panel conservando el tono. */
+:root[data-tema="claro"] {
+  color-scheme: light;
+
+  --bg: #eef4f2;
+  --panel: #ffffff;
+  --panel2: #e6efec;
+  --line: #d2e2dc;
+
+  --text: #10262b;
+  --dim: #5b7873;
+
+  --verde: #0a8467;
+  --verde2: #0d7d72;
+  --azul: #0b7fae;
+  --azul2: #d7ebf5;   /* mismo papel de fondo suave que el azul oscuro alla */
+  --ambar: #a4650a;
+  --rojo: #c0392b;
+
+  --sobre-acento: #ffffff;
+
+  --halos:
+    radial-gradient(60rem 30rem at 15% -10%, rgba(13, 148, 136, 0.10), transparent 70%),
+    radial-gradient(45rem 25rem at 95% 0%, rgba(11, 127, 174, 0.09), transparent 70%);
+
+  --sombra: 0 1px 2px rgba(16, 38, 43, 0.07);
+  --foco: 0 0 0 2px rgba(13, 125, 114, 0.35);
+}

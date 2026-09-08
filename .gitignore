@@ -17,3 +17,5 @@ __pycache__/
 # Configuracion local del despliegue: rutas de esta maquina y la clave de
 # LiteLLM. La plantilla versionada es .env.ejemplo.
 .env
+
+.claude/*

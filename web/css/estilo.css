@@ -1,64 +1,128 @@
-/* Hoja unica mientras el front quepa en una pagina. Sin framework y sin build:
-   el servidor no tiene internet y no hay node_modules que instalar alli. */
+/* Componentes de la interfaz. Sin framework y sin build: el servidor no tiene
+   internet y no hay node_modules que instalar alli.
+   Los colores viven en tokens.css; aqui no debe aparecer ningun literal. */
 
-:root {
-  --fondo: #f7f7f5;
-  --superficie: #ffffff;
-  --borde: #e2e2dd;
-  --texto: #23231f;
-  --tenue: #6b6b63;
-  --acento: #7c4a2d;
-  --acento-suave: #f3ece7;
-  --error: #a3341f;
-  --radio: 10px;
-  --sombra: 0 1px 2px rgba(0, 0, 0, 0.05);
-}
+@import url("tokens.css");
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --fondo: #1a1a18;
-    --superficie: #232320;
-    --borde: #35352f;
-    --texto: #ececE6;
-    --tenue: #9a9a90;
-    --acento: #d69a72;
-    --acento-suave: #2e2620;
-    --error: #e08a72;
-    --sombra: none;
-  }
-}
-
-* { box-sizing: border-box; }
+*,
+*::before,
+*::after { box-sizing: border-box; }
 
 body {
   margin: 0;
-  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  color: var(--texto);
-  background: var(--fondo);
+  min-height: 100vh;
+  font: 15px/1.55 var(--fuente);
+  color: var(--text);
+  background-color: var(--bg);
+  /* Dos halos muy tenues para que el fondo no sea un plano muerto. Fijos al
+     viewport para que no se muevan al desplazar el listado. */
+  background-image: var(--halos);
+  background-attachment: fixed;
+  background-repeat: no-repeat;
 }
 
-header {
-  border-bottom: 1px solid var(--borde);
-  background: var(--superficie);
-  padding: 1rem 1.25rem;
+a {
+  color: var(--azul);
+  text-decoration-color: color-mix(in srgb, var(--azul) 40%, transparent);
+  text-underline-offset: 2px;
 }
+
+a:hover { text-decoration-color: currentColor; }
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--foco);
+  border-radius: var(--radio-s);
+}
+
+/* --- Estructura --- */
+
+header {
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 85%, transparent);
+  backdrop-filter: blur(6px);
+  padding: 1rem 1.25rem;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.contenedor {
+  max-width: 60rem;
+  margin: 0 auto;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+/* El titulo ocupa lo que sobra para empujar el conmutador al borde derecho. */
+.contenedor .titulo { flex: 1; min-width: 0; }
+
+/* Conmutador de tema: un boton cuadrado y discreto, no una accion del dominio.
+   Lleva icono y aria-label porque un texto ("Claro"/"Oscuro") es ambiguo:
+   nunca se sabe si nombra el estado actual o el que se va a poner. */
+.tema {
+  flex: none;
+  width: 2.1rem;
+  height: 2.1rem;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radio-s);
+  background: var(--panel2);
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.tema:hover {
+  color: var(--verde);
+  border-color: var(--verde2);
+}
+
+.tema svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+
+/* Solo se ve el icono del tema al que se va a cambiar. */
+.tema .luna { display: none; }
+:root[data-tema="claro"] .tema .luna { display: block; }
+:root[data-tema="claro"] .tema .sol { display: none; }
 
 header h1 {
   margin: 0;
   font-size: 1.1rem;
   letter-spacing: -0.01em;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+/* Marca del titulo: barra verde en vez de un logotipo que no existe. */
+header h1::before {
+  content: "";
+  width: 3px;
+  height: 1.1em;
+  border-radius: 2px;
+  background: linear-gradient(var(--verde), var(--verde2));
 }
 
 header p {
-  margin: 0.15rem 0 0;
-  color: var(--tenue);
+  margin: 0.2rem 0 0 0.95rem;
+  color: var(--dim);
   font-size: 0.85rem;
 }
 
 main {
   max-width: 60rem;
   margin: 0 auto;
-  padding: 1.25rem;
+  padding: 1.5rem 1.25rem 2rem;
 }
 
 /* --- Filtros --- */
@@ -68,52 +132,94 @@ main {
   flex-wrap: wrap;
   gap: 0.75rem;
   align-items: flex-end;
-  margin-bottom: 1.25rem;
+  margin-bottom: 1.5rem;
+  padding: 0.9rem 1rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radio);
 }
 
 .campo {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.3rem;
 }
 
 .campo label {
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--tenue);
+  letter-spacing: 0.05em;
+  color: var(--dim);
 }
 
 input,
 select,
 button {
   font: inherit;
-  padding: 0.4rem 0.6rem;
-  border: 1px solid var(--borde);
-  border-radius: 6px;
-  background: var(--superficie);
-  color: inherit;
+  padding: 0.42rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radio-s);
+  background: var(--panel2);
+  color: var(--text);
+  transition: border-color 0.15s, background-color 0.15s, color 0.15s;
 }
+
+input:hover,
+select:hover { border-color: color-mix(in srgb, var(--verde2) 60%, var(--line)); }
 
 button {
   cursor: pointer;
-  background: var(--acento-suave);
   border-color: transparent;
-  color: var(--acento);
   font-weight: 500;
 }
 
-button:hover { filter: brightness(0.97); }
+/* Dentro de un formulario, el boton de envio es la accion principal y el resto
+   son secundarias: la semantica del formulario ya lo dice y no hacen falta
+   clases. Va acotado a .filtros para no pisar botones de chrome como el
+   conmutador de tema, que tiene la misma especificidad. */
+.filtros button[type="submit"] {
+  background: var(--verde2);
+  color: var(--sobre-acento);
+  font-weight: 600;
+}
+
+.filtros button[type="submit"]:hover {
+  background: var(--verde);
+}
+
+.filtros button[type="button"] {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--dim);
+}
+
+.filtros button[type="button"]:hover {
+  color: var(--text);
+  border-color: var(--verde2);
+}
+
+/* El contador de resultados se alinea al final de la barra de filtros. */
+#total {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 0.8rem;
+}
 
 /* --- Reuniones --- */
 
 .reunion {
-  background: var(--superficie);
-  border: 1px solid var(--borde);
+  background: var(--panel);
+  border: 1px solid var(--line);
   border-radius: var(--radio);
-  padding: 0.9rem 1rem;
+  padding: 1rem 1.1rem;
   margin-bottom: 0.75rem;
   box-shadow: var(--sombra);
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.reunion:hover {
+  background: var(--panel2);
+  border-color: color-mix(in srgb, var(--verde2) 45%, var(--line));
 }
 
 .reunion-cabecera {
@@ -127,64 +233,101 @@ button:hover { filter: brightness(0.97); }
 .reunion h2 {
   margin: 0;
   font-size: 1rem;
+  letter-spacing: -0.01em;
 }
 
 .reunion .uid {
-  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
-  font-size: 0.75rem;
-  color: var(--tenue);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  color: var(--dim);
+  margin-top: 0.25rem;
 }
 
 .etiqueta {
   display: inline-block;
-  padding: 0.05rem 0.45rem;
+  padding: 0.1rem 0.5rem;
   border-radius: 999px;
-  background: var(--acento-suave);
-  color: var(--acento);
-  font-size: 0.72rem;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  color: var(--dim);
+  font-size: 0.7rem;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+
+/* Un color por tipo de reunion: la insignia se lee de un vistazo al recorrer
+   el listado. Los tipos son los de summarize_teams.py (diccionario TIPOS). */
+.etiqueta[data-tipo="daily"] {
+  color: var(--verde);
+  border-color: color-mix(in srgb, var(--verde) 40%, transparent);
+}
+
+.etiqueta[data-tipo="planning"] {
+  color: var(--azul);
+  border-color: color-mix(in srgb, var(--azul) 40%, transparent);
+}
+
+.etiqueta[data-tipo="retro"] {
+  color: var(--ambar);
+  border-color: color-mix(in srgb, var(--ambar) 40%, transparent);
+}
+
+.etiqueta[data-tipo="workshop"] {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--text) 30%, transparent);
 }
 
 .resumen {
-  margin: 0.5rem 0 0.65rem;
-  color: var(--texto);
+  margin: 0.65rem 0 0.8rem;
+  color: var(--text);
 }
 
 .cifras {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.9rem;
-  font-size: 0.8rem;
-  color: var(--tenue);
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  color: var(--dim);
+}
+
+.cifras span {
+  padding: 0.12rem 0.5rem;
+  border-radius: var(--radio-s);
+  background: var(--panel2);
+  border: 1px solid var(--line);
 }
 
 .cifras b {
-  color: var(--texto);
+  color: var(--text);
   font-weight: 600;
 }
 
 /* --- Estados --- */
 
 .aviso {
-  padding: 1.25rem;
-  border: 1px dashed var(--borde);
+  padding: 1.5rem;
+  border: 1px dashed var(--line);
   border-radius: var(--radio);
-  color: var(--tenue);
+  color: var(--dim);
   text-align: center;
+  background: color-mix(in srgb, var(--panel) 60%, transparent);
 }
 
 .aviso.error {
   border-style: solid;
-  border-color: var(--error);
-  color: var(--error);
+  border-color: color-mix(in srgb, var(--rojo) 55%, transparent);
+  background: color-mix(in srgb, var(--rojo) 8%, var(--panel));
+  color: var(--rojo);
   text-align: left;
 }
 
 .aviso.error code {
   display: block;
-  margin-top: 0.4rem;
-  font-size: 0.85rem;
+  margin-top: 0.45rem;
+  font-family: var(--mono);
+  font-size: 0.84rem;
+  color: var(--text);
   opacity: 0.85;
 }
 
@@ -192,8 +335,10 @@ footer {
   max-width: 60rem;
   margin: 0 auto;
   padding: 0 1.25rem 2rem;
-  color: var(--tenue);
+  color: var(--dim);
   font-size: 0.78rem;
+  font-family: var(--mono);
 }
 
-footer .mal { color: var(--error); }
+footer .mal { color: var(--rojo); }
+footer .bien { color: var(--verde); }
