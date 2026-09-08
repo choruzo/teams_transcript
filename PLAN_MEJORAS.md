@@ -3,6 +3,11 @@
 Redactado el 2026-09-07. **Fases 0, 1 y 2 implementadas** (las fases 1 y 2 el
 2026-09-08); el resto es propuesta.
 
+Este documento cubre el **motor** (glosario, JSON estructurado, SQLite,
+arrastres, consulta y perfiles de voz). La **interfaz web** que lo consume
+—timeline, métricas, tablero de acciones, chat— se planifica aparte, en
+[`PLAN_INTERFAZ.md`](PLAN_INTERFAZ.md).
+
 ## 0. Decisiones tomadas (2026-09-07)
 
 | Cuestión | Decisión | Consecuencia en el plan |
