@@ -667,6 +667,105 @@ def reunion_por_uid(conn: sqlite3.Connection, uid: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM meetings WHERE uid = ?", (uid,)).fetchone()
 
 
+# --------------------------------------------------------------------------
+# Consultas de lectura (las explota la interfaz web)
+# --------------------------------------------------------------------------
+
+
+def _filtros_reuniones(
+    desde: str | None, hasta: str | None, tipo: str | None, uid: str | None = None
+) -> tuple[str, list]:
+    condiciones, valores = [], []
+    if uid:
+        condiciones.append("m.uid = ?")
+        valores.append(uid)
+    if desde:
+        condiciones.append("m.fecha >= ?")
+        valores.append(desde)
+    if hasta:
+        condiciones.append("m.fecha <= ?")
+        valores.append(hasta)
+    if tipo:
+        condiciones.append("m.tipo = ?")
+        valores.append(tipo)
+    return (" WHERE " + " AND ".join(condiciones) if condiciones else ""), valores
+
+
+def listar_reuniones(
+    conn: sqlite3.Connection,
+    *,
+    desde: str | None = None,
+    hasta: str | None = None,
+    tipo: str | None = None,
+    uid: str | None = None,
+    limite: int = 50,
+    desplazamiento: int = 0,
+) -> list[sqlite3.Row]:
+    """Reuniones de mas reciente a mas antigua, con sus recuentos.
+
+    Los recuentos van en subconsultas y no en JOIN + GROUP BY: con varios
+    LEFT JOIN a la vez las filas se multiplican entre si y los totales salen
+    inflados.
+    """
+    where, valores = _filtros_reuniones(desde, hasta, tipo, uid)
+    return conn.execute(
+        f"""
+        SELECT m.id, m.uid, m.fecha, m.titulo, m.tipo, m.duracion_seg,
+               m.resumen, m.audio_path, m.transcript_path, m.creado_en,
+               (SELECT count(*) FROM segments s WHERE s.meeting_id = m.id)
+                   AS n_segmentos,
+               (SELECT count(*) FROM actions a WHERE a.meeting_id_origen = m.id)
+                   AS n_acciones,
+               (SELECT count(*) FROM risks r WHERE r.meeting_id = m.id)
+                   AS n_riesgos,
+               (SELECT count(*) FROM updates u WHERE u.meeting_id = m.id)
+                   AS n_updates
+          FROM meetings m
+          {where}
+         ORDER BY m.fecha DESC, m.id DESC
+         LIMIT ? OFFSET ?
+        """,
+        (*valores, limite, desplazamiento),
+    ).fetchall()
+
+
+def contar_reuniones(
+    conn: sqlite3.Connection,
+    *,
+    desde: str | None = None,
+    hasta: str | None = None,
+    tipo: str | None = None,
+) -> int:
+    where, valores = _filtros_reuniones(desde, hasta, tipo)
+    return conn.execute(
+        f"SELECT count(*) FROM meetings m {where}", valores
+    ).fetchone()[0]
+
+
+def resumen_bd(conn: sqlite3.Connection) -> dict:
+    """Cifras generales de la base. Alimenta el endpoint de salud."""
+    def cuantos(tabla: str) -> int:
+        return conn.execute(f"SELECT count(*) FROM {tabla}").fetchone()[0]
+
+    fechas = conn.execute(
+        "SELECT min(fecha) AS primera, max(fecha) AS ultima FROM meetings"
+    ).fetchone()
+    return {
+        "esquema": conn.execute("PRAGMA user_version").fetchone()[0],
+        "journal_mode": conn.execute("PRAGMA journal_mode").fetchone()[0],
+        "reuniones": cuantos("meetings"),
+        "personas": cuantos("personas"),
+        "acciones": cuantos("actions"),
+        "acciones_abiertas": conn.execute(
+            "SELECT count(*) FROM actions WHERE estado NOT IN ('completada', 'abandonada')"
+        ).fetchone()[0],
+        "riesgos": cuantos("risks"),
+        "segmentos": cuantos("segments"),
+        "primera_reunion": fechas["primera"],
+        "ultima_reunion": fechas["ultima"],
+    }
+
+
 # `excluir_meeting_id` no se limita a filtrar: simula el efecto de
 # `_deshacer_arrastres`, porque al reprocesar una reunion esa pasada se va a
 # deshacer igualmente. Sin esto, una accion ajena que la pasada anterior marco
@@ -758,3 +857,58 @@ def aplicar_arrastres(
         )
         aplicados += 1
     return aplicados
+
+
+# --------------------------------------------------------------------------
+# CLI de mantenimiento
+# --------------------------------------------------------------------------
+
+
+def _main() -> None:
+    """`python memoria.py --migrar` / `--info`.
+
+    Existe por el servidor cerrado: la API se abre en solo lectura y no puede
+    migrar la base, asi que hace falta una forma explicita de hacerlo sin
+    tener que procesar una reunion entera ni abrir una shell de Python.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Mantenimiento de meetings.db")
+    parser.add_argument("--db", help="Ruta de la base (por defecto: TEAMS_DB)")
+    parser.add_argument(
+        "--migrar",
+        action="store_true",
+        help="Aplica las migraciones pendientes del esquema",
+    )
+    parser.add_argument(
+        "--info", action="store_true", help="Muestra las cifras de la base"
+    )
+    args = parser.parse_args()
+
+    path = ruta_bd(args.db)
+    if not (args.migrar or args.info):
+        parser.error("indica --migrar o --info")
+
+    if args.migrar:
+        if not path.exists():
+            parser.error(f"No existe la base de datos: {path}")
+        antes = sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0]
+        conn = conectar(path)  # migra al abrir
+        despues = conn.execute("PRAGMA user_version").fetchone()[0]
+        conn.close()
+        if antes == despues:
+            print(f"{path}: ya estaba en el esquema {despues}, nada que hacer.")
+        else:
+            print(f"{path}: migrada del esquema {antes} al {despues}.")
+
+    if args.info:
+        conn = conectar(path, solo_lectura=True)
+        try:
+            for clave, valor in resumen_bd(conn).items():
+                print(f"{clave:>18}: {valor}")
+        finally:
+            conn.close()
+
+
+if __name__ == "__main__":
+    _main()

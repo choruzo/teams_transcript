@@ -1,0 +1,48 @@
+# Despliegue de la interfaz web. Vale igual en el portatil y en el servidor
+# porque la estructura del proyecto es la misma en ambos.
+#
+# NO hay clave `build:` a proposito: en el servidor no hay internet y un build
+# solo puede fallar. La imagen se construye en el portatil y se lleva con
+# `docker save` / `docker load` (ver docker/DESPLIEGUE.md).
+
+services:
+  api:
+    image: teams-transcript-api:0.1.0   # tag fijo y versionado, nunca :latest
+    pull_policy: never                  # no intentes ir a ningun registro
+    container_name: teams-api
+    restart: unless-stopped
+
+    environment:
+      TEAMS_DB: /app/datos/meetings.db
+      # Por defecto la API no escribe. Cuando existan los endpoints de
+      # correccion manual (fase I6) habra que ponerlo a 0 conscientemente.
+      TEAMS_API_SOLO_LECTURA: "1"
+      # La BD guarda rutas absolutas de la maquina que proceso la reunion;
+      # dentro del contenedor el proyecto vive en /app. Ajusta el origen a la
+      # ruta real del host (en Windows, algo como
+      # C:\Users\tu_usuario\Documents\teams_transcript).
+      TEAMS_RAIZ_ORIGEN: ${TEAMS_RAIZ_ORIGEN:-}
+      TEAMS_RAIZ_LOCAL: /app
+
+    volumes:
+      # Codigo: se monta, no se hornea. Actualizar = scp + docker compose restart.
+      - ./api:/app/api:ro
+      - ./web:/app/web:ro
+      - ./memoria.py:/app/memoria.py:ro
+      # Datos: en el host, nunca dentro de una imagen (contienen el texto
+      # literal de las reuniones). Con escritura porque SQLite en WAL necesita
+      # crear los ficheros -wal y -shm aunque solo se lea.
+      - ./datos:/app/datos
+      - ./grabaciones:/app/grabaciones:ro
+
+    # Solo localhost: se accede por tunel SSH. Abrirlo a la LAN exige
+    # autenticacion primero (PLAN_INTERFAZ.md, seccion 6).
+    ports:
+      - "127.0.0.1:8080:8000"
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/salud').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

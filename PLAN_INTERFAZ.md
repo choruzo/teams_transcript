@@ -1,7 +1,7 @@
 # Plan de interfaz: de "scripts" a "memoria del equipo consultable"
 
-Redactado el 2026-09-08. **Fase D0 implementada** (2026-09-08); el resto es
-propuesta.
+Redactado el 2026-09-08. **Fases D0 e I0 implementadas** (2026-09-08); el resto
+es propuesta.
 
 Documento complementario de [`PLAN_MEJORAS.md`](PLAN_MEJORAS.md). Aquel define
 el *motor* (glosario, JSON estructurado, SQLite, arrastres, consulta en
@@ -576,7 +576,7 @@ pendientes de decidir, y ninguna bloquea el arranque:
 | Orden | Fase | Contenido | Esfuerzo | Depende de |
 |---|---|---|---|---|
 | ~~0~~ | ~~**D0 — Deuda previa**~~ **hecha** | D1 (uid estable), D2 (remapeo de rutas), D5 (conexión de solo lectura), WAL y los primeros tests | Bajo | Nada |
-| 1 | **I0 — Esqueleto** | FastAPI + Docker + `/api/salud` + `/api/reuniones` + una página que las liste | Bajo | D0 |
+| ~~1~~ | ~~**I0 — Esqueleto**~~ **hecha** | FastAPI + Docker + `/api/salud` + `/api/reuniones` + una página que las liste | Bajo | D0 |
 | 2 | **I1 — Timeline y métricas** | 3.1 y 3.2 en SVG, filtros en la URL | Medio | I0 |
 | 3 | **I2 — Vista de reunión** | 3.3 sin audio: resumen, secciones, transcripción | Bajo | I0 |
 | 4 | **I3 — Tablero de acciones** | 3.4 en solo lectura, con badge de estancamiento | Bajo | I0 |
@@ -682,6 +682,67 @@ reprocesar se borran y se reinsertan con id nuevo—. No hace falta hasta I6, y
 la clave adecuada (probablemente el par `uid` de la reunión de origen +
 descripción normalizada) se decide entonces, con datos reales delante. Es la
 cuestión abierta 1.
+
+---
+
+## 9 ter. Resultado de I0 (2026-09-08)
+
+Ficheros nuevos: `api/` (5 módulos), `web/` (página, CSS, dos módulos JS),
+`docker/` (Dockerfile, `exportar.ps1`, `DESPLIEGUE.md`), `docker-compose.yml`,
+`requirements-api.txt`, `.env.ejemplo`, `.gitattributes` y
+`tests/test_api.py`. En `memoria.py`, las consultas de lectura
+(`listar_reuniones`, `contar_reuniones`, `resumen_bd`) y un CLI de
+mantenimiento.
+
+Endpoints: `GET /api/salud`, `GET /api/reuniones` (filtros `desde`, `hasta`,
+`tipo`, paginación) y `GET /api/reuniones/{uid}`. La página lista las reuniones
+con sus recuentos, filtra, y guarda el filtro en la URL.
+
+Decisiones y hallazgos:
+
+1. **La imagen pesa 52 MB, no los 200 estimados.** Consecuencia directa de no
+   hornear el código ni `torch`: es una imagen base de Python con FastAPI.
+   Transferirla por `scp` es un no-problema.
+2. **Un despliegue sobre una base sin migrar se rompía con un `no such
+   column: m.uid`.** Pasó de verdad al probar contra la base real, que seguía
+   en el esquema 1. Una API de solo lectura no puede migrar, así que ahora
+   `deps` comprueba `user_version` y devuelve un **503 que dice el comando
+   exacto** (`python memoria.py --migrar --db …`). De ahí salió el CLI de
+   mantenimiento, que el plan no contemplaba.
+3. **`/api/salud` no depende de la conexión a la base**, a propósito: es el
+   endpoint que hay que poder consultar precisamente cuando la base no abre.
+   Diagnostica siempre en solo lectura, para que mirar el estado no tenga el
+   efecto secundario de migrar.
+4. **El montaje estático va el último.** `app.mount("/")` coincide con
+   cualquier ruta y eclipsaba a `/favicon.ico`, que devolvía 404.
+5. **`docker save` produce un `.tar` que `docker load` restaura tal cual**:
+   verificado borrando la imagen local y recargándola.
+
+Verificado:
+
+- **35 tests en verde** (19 de `memoria.py` + 16 de la API). En el venv de
+  Whisper, sin FastAPI, los 16 de la API **se saltan solos** y la suite sigue
+  pasando: es lo que ocurrirá en el servidor de transcripción.
+- **Contra la base real**, no contra una de prueba: 1 reunión, 145 segmentos,
+  17 acciones. Migrada del esquema 1 al 2 (con copia previa).
+- **El ciclo de exportación completo**: `exportar.ps1` → `docker save` (51,8 MB
+  + SHA256) → borrar la imagen local → `docker load` → `docker compose up -d`
+  → contenedor `healthy` y `/api/salud` respondiendo. Sin `build` y sin
+  contactar con ningún registro.
+- **El remapeo de rutas (D2) funcionando de verdad**: la fila de la base
+  guarda `C:\Users\…\grabaciones\20260907_090437_mixed.wav` y dentro del
+  contenedor se resuelve a `/app/grabaciones/20260907_090437_mixed.wav`, que
+  existe. Es exactamente el caso del servidor leyendo filas escritas en otra
+  máquina.
+- **WAL sobre el bind mount de Windows funcionó** (`journal_mode: wal`,
+  lecturas correctas). No invalida la advertencia de 5.4: sigue habiendo que
+  repetir las pruebas de concurrencia en el servidor, donde el montaje es
+  nativo.
+
+**Pendiente, menor:** la página no se ha visto en un navegador (la extensión de
+Chrome no estaba conectada); se ha comprobado que el HTML, el CSS y los dos
+módulos JS se sirven con el tipo correcto, pero el render real está sin
+validar.
 
 ---
 

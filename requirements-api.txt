@@ -1,0 +1,35 @@
+# Dependencias de la interfaz web (api/). NO las necesita el pipeline:
+# record_teams.py, transcribe_teams.py, summarize_teams.py, memoria.py y
+# glosario.py siguen siendo stdlib pura o requirements.txt. Fichero aparte a
+# proposito, para que instalar el servidor web no sea un requisito para
+# transcribir.
+#
+# Versiones exactas (== y no >=) porque la imagen se construye en el portatil
+# y se exporta a un servidor sin internet: hay que poder reconstruir dentro de
+# seis meses exactamente lo mismo. Ver PLAN_INTERFAZ.md, seccion 5.
+#
+# Generado con `pip freeze` sobre un entorno limpio con:
+#     pip install fastapi uvicorn httpx
+# `httpx` es para los tests (fastapi.testclient); va en la imagen porque pesa
+# poco y permite diagnosticar en el servidor.
+PyYAML==6.0.3
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+certifi==2026.7.22
+click==8.5.0
+fastapi==0.141.1
+h11==0.16.0
+httpcore==1.0.9
+httptools==0.8.0
+httpx==0.28.1
+idna==3.19
+pydantic==2.13.5
+pydantic_core==2.46.5
+python-dotenv==1.2.3
+starlette==1.6.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+uvicorn==0.52.4
+watchfiles==1.2.0
+websockets==17.1

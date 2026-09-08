@@ -9,3 +9,11 @@ __pycache__/
 /datos/*
 !/datos/glosario.ejemplo.md
 /salida_con_glosario/*
+
+# Paquete de exportacion de la imagen Docker (docker/exportar.ps1): son
+# cientos de MB regenerables desde el Dockerfile.
+/dist/
+
+# Configuracion local del despliegue: rutas de esta maquina y la clave de
+# LiteLLM. La plantilla versionada es .env.ejemplo.
+.env

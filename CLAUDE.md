@@ -10,7 +10,8 @@ Herramienta local en dos scripts independientes para grabar reuniones de Teams y
 - `transcribe_teams.py` — transcribe un `.wav` con Whisper (`openai-whisper`), generando `.txt` y `.srt`. Multiplataforma (Windows/Linux), usa GPU CUDA si está disponible. Con `--diarize` añade identificación de hablantes vía `pyannote.audio` (dependencia opcional, requiere token de HuggingFace).
 - `glosario.py` — módulo compartido que carga el glosario del proyecto (`datos/glosario.md`) y prepara sus dos usos: `initial_prompt` de Whisper y contexto del LLM. Solo stdlib.
 - `summarize_teams.py` — resume un `.txt` de transcripción usando un LLM local servido vía LiteLLM (API compatible con OpenAI, sin dependencias externas más allá de la stdlib), generando `<nombre>_resumen.md` y volcando el resultado en el histórico SQLite.
-- `memoria.py` — capa de acceso a `datos/meetings.db` (SQLite + FTS5, solo stdlib). Ningún otro script escribe SQL suelto.
+- `memoria.py` — capa de acceso a `datos/meetings.db` (SQLite + FTS5, solo stdlib). Ningún otro script escribe SQL suelto. También es un CLI de mantenimiento: `python memoria.py --migrar` / `--info`.
+- `api/` + `web/` — interfaz web (fase I0 de `PLAN_INTERFAZ.md`): FastAPI sirviendo `/api` y la página estática de `web/`. **Es lo único del repo que no es stdlib**; sus dependencias van en `requirements-api.txt`, aparte, para que el pipeline no dependa de ellas.
 
 Estos dos scripts se ejecutan en máquinas distintas en el flujo típico: se graba en un PC Windows y se transcribe en un servidor Linux con GPU (ver `DEPLOY_OFFLINE.md`).
 
@@ -39,13 +40,22 @@ Transcribir:
 .\.venv\Scripts\python.exe transcribe_teams.py archivo.wav --model medium --device cuda --language auto
 ```
 
-Tests (solo `memoria.py` de momento; no hay linter):
+Interfaz web (local, para desarrollar):
+
+```powershell
+python -m pip install -r requirements-api.txt
+python -m uvicorn api.main:app --reload --port 8080
+# o, como corre en el servidor:
+docker compose up -d          # http://127.0.0.1:8080
+```
+
+Tests (`memoria.py` y la API; no hay linter):
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
 
-Son `unittest` de la stdlib, sin pytest ni dependencias: tienen que poder ejecutarse en el servidor offline. Lo que no cubren —la transcripción y la llamada al LLM— se sigue verificando ejecutando los scripts a mano contra un `.wav` de prueba.
+Son `unittest` de la stdlib, sin pytest ni dependencias: tienen que poder ejecutarse en el servidor offline. Los de `test_api.py` **se saltan solos** si FastAPI no está instalado, para no romper la suite en el venv de Whisper. Lo que no cubren —la transcripción y la llamada al LLM— se sigue verificando ejecutando los scripts a mano contra un `.wav` de prueba.
 
 ## Arquitectura y puntos a tener en cuenta
 
@@ -94,7 +104,11 @@ Son `unittest` de la stdlib, sin pytest ni dependencias: tienen que poder ejecut
 - **Limpieza de bucles de repetición** (`colapsar_repeticiones`): el `carry` realimenta las alucinaciones repetitivas de Whisper sobre el silencio final. La función distingue dos casos para no destruir habla legítima: textos cortos ("Vale.", "Gracias.") solo se recortan si se repiten más de 2 veces **seguidas**; frases de 4+ palabras se descartan si ya aparecen en los 10 segmentos anteriores (la racha suele venir rota por líneas sueltas, por eso ventana y no comparación con el anterior). Se aplica antes de escribir `.txt`/`.srt`; `--sin-limpieza` lo desactiva.
 - **Codificación de consola**: `transcribe_teams.py` fuerza `utf-8` en `sys.stdout` porque la consola de Windows (cp1252/cp850) no soporta todos los caracteres que puede emitir Whisper.
 - **Despliegue offline con GPU** (`DEPLOY_OFFLINE.md`): describe cómo preparar un "bundle" (wheels de PyTorch/whisper para Linux x86_64/Python 3.12, ffmpeg estático, modelos `.pt` cacheados) para transcribir en un servidor Ubuntu sin acceso a internet. Relevante solo si se toca el flujo de transcripción en un entorno sin conexión.
-- `grabaciones/` (salida de audio) y `.venv/` están en `.gitignore`; no versionar `.wav`/`.pt`.
+- **La interfaz web no escribe SQL** (`api/`): toda consulta vive en `memoria.py`, compartida con el pipeline y con los futuros `ask_teams.py`/`report_teams.py`. La API abre siempre con `conectar(solo_lectura=True)` (`TEAMS_API_SOLO_LECTURA`, por defecto activo) y **falla con un 503 explicativo si la base está en un esquema anterior**, porque en solo lectura no puede migrarla y las consultas se romperían con un `no such column` incomprensible; el mensaje indica el `python memoria.py --migrar` que lo arregla. `/api/salud` es el único endpoint que **no** depende de la conexión: tiene que responder aunque la base no se pueda abrir, que es cuando hace falta.
+- **Direccionamiento por `uid`, nunca por `id`** en las URLs de la API (`/api/reuniones/{uid}`): el `id` cambia al reprocesar y rompería enlaces guardados y citas.
+- **La imagen Docker se construye en Windows y se exporta al servidor** (`docker/exportar.ps1` → `docker save` → `scp` → `docker load`), porque el servidor no tiene internet. Por eso `docker-compose.yml` **no tiene clave `build:`**, usa un tag versionado (nunca `:latest`) y `pull_policy: never`. La imagen lleva solo Python y las dependencias: `api/`, `web/` y `memoria.py` se montan como volumen, así que actualizar el front es un `scp` de kilobytes y no reexportar 52 MB. Detalles en `docker/DESPLIEGUE.md`.
+- **`.gitattributes` fuerza LF** en `Dockerfile`, `*.yml` y `*.sh`: con CRLF, un script dentro del contenedor falla con un `bad interpreter` que no dice nada.
+- `grabaciones/` (salida de audio), `.venv/`, `dist/` (el `.tar` de la imagen) y `.env` están en `.gitignore`; no versionar `.wav`/`.pt`. La plantilla `.env.ejemplo` sí.
 
 ## Aviso legal
 

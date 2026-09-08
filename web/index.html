@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Memoria del equipo</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/estilo.css">
+</head>
+<body>
+  <header>
+    <h1>Memoria del equipo</h1>
+    <p>Histórico de reuniones transcritas y resumidas</p>
+  </header>
+
+  <main>
+    <form class="filtros" id="filtros">
+      <div class="campo">
+        <label for="desde">Desde</label>
+        <input type="date" id="desde" name="desde">
+      </div>
+      <div class="campo">
+        <label for="hasta">Hasta</label>
+        <input type="date" id="hasta" name="hasta">
+      </div>
+      <div class="campo">
+        <label for="tipo">Tipo</label>
+        <select id="tipo" name="tipo">
+          <option value="">Todos</option>
+          <option value="daily">Daily</option>
+          <option value="workshop">Workshop</option>
+          <option value="retro">Retro</option>
+          <option value="planning">Planning</option>
+        </select>
+      </div>
+      <button type="submit">Filtrar</button>
+      <button type="button" id="limpiar">Limpiar</button>
+      <span id="total" class="uid"></span>
+    </form>
+
+    <section id="listado">
+      <div class="aviso">Cargando…</div>
+    </section>
+  </main>
+
+  <footer>
+    <span id="salud"></span>
+  </footer>
+
+  <!-- type="module" para poder importar api.js. Sin bundler: el servidor no
+       tiene internet y no hay cadena de construccion que mantener. -->
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

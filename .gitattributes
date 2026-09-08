@@ -1,0 +1,19 @@
+# Los ficheros que acaban dentro de un contenedor Linux o se ejecutan alli
+# necesitan LF: con CRLF, un script falla con un "bad interpreter" que no dice
+# nada, y un Dockerfile o un YAML pueden romperse de formas peores.
+* text=auto eol=lf
+
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+Dockerfile.*    text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+
+# Los .ps1 se ejecutan en Windows.
+*.ps1           text eol=crlf
+
+# Binarios: que git no los toque.
+*.wav           binary
+*.pt            binary
+*.db            binary
+*.tar           binary
