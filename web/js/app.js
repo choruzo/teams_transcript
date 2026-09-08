@@ -30,6 +30,11 @@ function escapar(texto) {
   return nodo.innerHTML;
 }
 
+// Plural del castellano para los contadores: "1 reunión" / "2 reuniones".
+function plural(cantidad, singular, plural_) {
+  return `${cantidad} ${cantidad === 1 ? singular : plural_}`;
+}
+
 function duracion(segundos) {
   if (!segundos) return null;
   const minutos = Math.round(segundos / 60);
@@ -42,10 +47,12 @@ function tarjeta(reunion) {
   const partes = [];
   const dur = duracion(reunion.duracion_seg);
   if (dur) partes.push(`<span>${dur}</span>`);
-  partes.push(`<span><b>${reunion.n_segmentos}</b> segmentos</span>`);
-  partes.push(`<span><b>${reunion.n_acciones}</b> acciones</span>`);
+  const cifra = (n, sing, plur) =>
+    `<span><b>${n}</b> ${n === 1 ? sing : plur}</span>`;
+  partes.push(cifra(reunion.n_segmentos, "segmento", "segmentos"));
+  partes.push(cifra(reunion.n_acciones, "acción", "acciones"));
   if (reunion.n_riesgos) {
-    partes.push(`<span><b>${reunion.n_riesgos}</b> riesgos</span>`);
+    partes.push(cifra(reunion.n_riesgos, "riesgo", "riesgos"));
   }
   if (reunion.tiene_audio) partes.push("<span>con audio</span>");
 
@@ -88,8 +95,7 @@ async function cargar() {
       $("#total").textContent = "";
       return;
     }
-    $("#total").textContent =
-      pagina.total === 1 ? "1 reunión" : `${pagina.total} reuniones`;
+    $("#total").textContent = plural(pagina.total, "reunión", "reuniones");
     $("#listado").innerHTML = pagina.reuniones.map(tarjeta).join("");
   } catch (error) {
     pintarError(error.message);
@@ -110,8 +116,8 @@ async function pintarSalud() {
     const trozos = [
       `v${escapar(salud.version)}`,
       `esquema ${salud.esquema}`,
-      `${salud.reuniones} reuniones`,
-      `${salud.acciones_abiertas} acciones abiertas`,
+      plural(salud.reuniones, "reunión", "reuniones"),
+      plural(salud.acciones_abiertas, "acción abierta", "acciones abiertas"),
     ];
     if (salud.solo_lectura) trozos.push("solo lectura");
     pie.textContent = trozos.join(" · ");
