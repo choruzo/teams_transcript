@@ -28,6 +28,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import glosario as glosario_mod
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -76,9 +78,29 @@ SYSTEM_PROMPT = (
 )
 
 
+GLOSARIO_PROMPT = (
+    "\n\nGlosario del proyecto. Usalo para reconocer y **corregir** los "
+    "terminos que la transcripcion automatica haya deformado (siglas, nombres "
+    "propios, productos): escribe siempre la forma correcta del glosario, no "
+    "la que aparece en la transcripcion. Si un termino de la transcripcion no "
+    "esta en el glosario y no lo entiendes, no lo inventes: dilo. El glosario "
+    "puede incluir una seccion de terminos dudosos, que son precisamente los "
+    "que aun no estan confirmados; trata esos con cautela.\n\n"
+)
+
+
 def call_litellm(
-    base_url: str, api_key: str, model: str, transcript: str, attendees: str | None
+    base_url: str,
+    api_key: str,
+    model: str,
+    transcript: str,
+    attendees: str | None,
+    glosario: str | None = None,
 ) -> str:
+    system_content = SYSTEM_PROMPT
+    if glosario:
+        system_content += GLOSARIO_PROMPT + glosario
+
     user_content = ""
     if attendees:
         user_content += (
@@ -91,7 +113,7 @@ def call_litellm(
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_content},
             {"role": "user", "content": user_content},
         ],
         "temperature": 0.3,
@@ -147,6 +169,17 @@ def main() -> None:
         "etiquetas SPEAKER_XX a nombres reales",
     )
     parser.add_argument(
+        "--glosario",
+        default=None,
+        help="Ruta al glosario del proyecto, para corregir siglas y nombres mal "
+        "transcritos (por defecto: datos/glosario.md si existe)",
+    )
+    parser.add_argument(
+        "--sin-glosario",
+        action="store_true",
+        help="No usar el glosario aunque exista datos/glosario.md",
+    )
+    parser.add_argument(
         "--output",
         default=None,
         help="Ruta del .md de salida (por defecto: <nombre>_resumen.md junto a la transcripcion)",
@@ -169,11 +202,26 @@ def main() -> None:
 
     transcript = transcript_path.read_text(encoding="utf-8")
 
+    glosario = None
+    if not args.sin_glosario:
+        if args.glosario and not Path(args.glosario).exists():
+            print(
+                f"Error: no se encuentra el glosario '{args.glosario}'",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        contenido = glosario_mod.cargar(args.glosario)
+        if contenido:
+            glosario = glosario_mod.texto_completo(contenido)
+
     print(f"Modelo:    {args.model}")
     print(f"LiteLLM:   {args.base_url}")
+    print(f"Glosario:  {'si' if glosario else 'no'}")
     print(f"Resumiendo '{transcript_path.name}'...")
 
-    summary = call_litellm(args.base_url, api_key, args.model, transcript, args.attendees)
+    summary = call_litellm(
+        args.base_url, api_key, args.model, transcript, args.attendees, glosario
+    )
 
     output_path = Path(args.output) if args.output else transcript_path.with_name(
         f"{transcript_path.stem}_resumen.md"

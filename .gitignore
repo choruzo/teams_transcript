@@ -1,2 +1,10 @@
 /.venv
 /grabaciones
+__pycache__/
+
+# Datos de reuniones: no se versionan. La plantilla del glosario si.
+# Se ignora el CONTENIDO de datos/ (no el directorio) para poder excluir
+# glosario.ejemplo.md: git no reincluye ficheros dentro de un directorio
+# ignorado.
+/datos/*
+!/datos/glosario.ejemplo.md

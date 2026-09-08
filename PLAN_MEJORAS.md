@@ -1,6 +1,15 @@
 # Plan de mejoras: de "transcriptor" a "memoria del equipo"
 
-Estado: propuesta, sin implementar. Redactado el 2026-09-07.
+Redactado el 2026-09-07. **Fase 0 implementada**; el resto es propuesta.
+
+## 0. Decisiones tomadas (2026-09-07)
+
+| Cuestión | Decisión | Consecuencia en el plan |
+|---|---|---|
+| Tipos de reunión | Principalmente dailys; también workshops y retros/plannings. Prompts distintos seleccionables, **daily por defecto** | Fase 1: campo `tipo` en `meetings` y flag `--tipo {daily,workshop,retro,planning}` en `summarize_teams.py`, con una plantilla de prompt por tipo |
+| Ubicación de `meetings.db` | **Servidor Linux con GPU** | Transcripción y resumen se ejecutan allí; `ask_teams.py`/`report_teams.py` también. LiteLLM debe ser accesible desde el servidor (`--base-url`), no solo desde el portátil. El glosario tiene que existir en el servidor |
+| Exportación a Planner/Jira | **No de momento**, el Markdown basta | Fase 5 genera solo Markdown. Sin integraciones ni credenciales; se mantiene el "todo local" |
+| Umbral de similitud de voz | Sin decidir: se calibra con datos reales en la Fase 3 | Fase 3 arranca con `--dry-run` que muestra similitudes sin aplicarlas |
 
 ## 1. Objetivo
 
@@ -77,30 +86,82 @@ audio.wav
 
 ---
 
-## Fase 0 — Glosario del proyecto
+## Fase 0 — Glosario del proyecto — IMPLEMENTADA
 
 **Resuelve:** P5. **Esfuerzo:** bajo. **Riesgo:** ninguno.
 
-Fichero `datos/glosario.md` mantenido a mano, con tres secciones: personas del
-equipo, productos/componentes (OLS, WLS, VTS, banda base, GACF, VCD, GTR,
-Coverity, SBR, XSD...) y siglas internas.
+Ficheros añadidos: `glosario.py` (módulo compartido, solo stdlib),
+`datos/glosario.md` (real, no versionado) y `datos/glosario.ejemplo.md`
+(plantilla, versionada).
 
-Se usa en dos puntos:
+El glosario es Markdown normal. La parte destinada a Whisper se delimita con
+comentarios HTML `<!-- whisper -->` / `<!-- /whisper -->`; el resto del
+documento se usa solo con el LLM. Se usa en dos puntos:
 
-1. **Whisper** (`transcribe_teams.py`): nuevo flag `--glosario RUTA`, que
-   alimenta el parámetro `initial_prompt` del modelo. Mejora notablemente el
-   reconocimiento de siglas y nombres propios.
-   - *Limitación importante*: `initial_prompt` de Whisper está acotado a unos
-     224 tokens (la mitad de la ventana del decoder). No cabe un glosario
-     largo, así que el fichero tendrá una sección corta marcada como
-     "prioritaria" para Whisper, y el resto se usará solo en el LLM.
+1. **Whisper** (`transcribe_teams.py`): la sección marcada alimenta el
+   parámetro `initial_prompt`, formateada como frase ("Reunión de trabajo en
+   español. Términos que aparecen: ...") porque Whisper responde mejor a eso
+   que a una lista pelada.
+   - *Limitación real*: Whisper recorta `initial_prompt` a `n_ctx // 2 - 1`
+     tokens (~224) **quedándose con los últimos**, así que pasarse no trunca
+     el final sino que borra el principio. `glosario.py` trunca antes, por
+     coma, en `LIMITE_CARACTERES_WHISPER = 700`, y avisa por stderr.
 2. **LLM** (`summarize_teams.py`): el glosario completo se inyecta en el
-   system prompt para que el modelo corrija en el resumen los términos que
-   Whisper haya destrozado, en vez de arrastrar "cuisine" o "el son".
+   system prompt con instrucción explícita de **corregir** los términos
+   deformados y de tratar con cautela la sección "Dudosos".
 
-**Criterio de aceptación:** reprocesar `20260907_090437_mixed.wav` con
-glosario y comprobar que "Goverity" pasa a "Coverity" y que las siglas del
-proyecto aparecen bien escritas en el resumen.
+Ambos scripts: se usa `datos/glosario.md` automáticamente si existe,
+`--glosario RUTA` para otro fichero, `--sin-glosario` para desactivarlo. Si se
+pasa `--glosario` con una ruta inexistente es error; que falte el fichero por
+defecto no lo es.
+
+### Resultado verificado (2026-09-07, `large-v3` en GPU sobre la daily del 7-sep)
+
+| Término | Sin glosario | Con glosario | Con glosario + carry |
+|---|---|---|---|
+| ULS | "OLS" ×4, "WLS" ×1 | ULS ×3, "VLS" ×1 | **ULS ×5** |
+| Thales | "Tales" | "tales" | **Thales** |
+| Coverity | "Goverity" | "Goverity" | **Coverity** |
+| eqsim | "cuisine" | "Cusin" | **eqsim** |
+| planner | "el plan" | "el plan" | **planner** |
+
+**El `carry` resultó imprescindible.** Whisper inyecta `initial_prompt` solo en
+la primera ventana de 30 s; después, `condition_on_previous_text` hace que el
+contexto sea el texto ya transcrito y el glosario se diluye. Sin
+`carry_initial_prompt=True` el efecto fue irregular (3 de 5 aciertos en ULS,
+más una regresión: "con OLS" pasó a "no el ese"). Con carry, todos los
+objetivos salvo uno.
+
+**Efecto secundario del carry:** bucles de repetición al final del audio
+("VTS 8, en la estación 8..." ×5, "Gracias." ×10). Whisper alucina sobre el
+silencio final y el prompt reinyectado lo realimenta. Resuelto con
+`colapsar_repeticiones()` en `transcribe_teams.py`, que elimina los artefactos
+de forma determinista antes de escribir `.txt`/`.srt`: 16 segmentos eliminados
+sobre la salida real, conservando el 96 % de las palabras y los cinco términos
+del glosario intactos. Desactivable con `--sin-limpieza`.
+
+**Reproducibilidad:** una tercera pasada, ya con `--diarize`, dio exactamente
+los mismos recuentos en los cinco términos (ULS ×5, Thales ×2, Coverity ×1,
+eqsim ×3, GACF ×2, planner ×2). El efecto del glosario es estable entre
+ejecuciones, pese a que Whisper no es determinista.
+
+**Hallazgo colateral:** el misterioso "cuisine" era **eqsim**, el simulador de
+equipos. El glosario lo resolvió.
+
+**Limitación conocida:** `colapsar_repeticiones` solo detecta repeticiones
+*idénticas y cercanas*. Whisper a veces repite al final del audio una frase
+dicha mucho antes y con variaciones mínimas ("en la VTS 8, ... correcto." vs
+"en la VTS8, ... correcto"), y eso no lo captura. Ampliar la ventana o usar
+comparación difusa dispararía los falsos positivos, así que se deja como está:
+el prompt de `summarize_teams.py` ya instruye al LLM para ignorar los
+fragmentos repetitivos del final.
+
+**Único objetivo no cumplido:** "el son" no pasó a JSON; Whisper produjo "el
+SOAM" por su cuenta. Queda en la sección "Dudosos" del glosario, pendiente de
+confirmar si SOAM es un término real del proyecto.
+
+**Mantenimiento:** la sección "Dudosos" de `datos/glosario.md` conserva lo que
+sigue sin confirmar (GCS4-1 / 4.1, SOAM).
 
 ---
 
@@ -115,7 +176,8 @@ proyecto aparecen bien escritas en el resumen.
 CREATE TABLE meetings (
   id              INTEGER PRIMARY KEY,
   fecha           TEXT NOT NULL,        -- ISO-8601, de la fecha del audio
-  titulo          TEXT,                 -- "Daily", editable
+  titulo          TEXT,
+  tipo            TEXT NOT NULL DEFAULT 'daily',  -- daily|workshop|retro|planning
   audio_path      TEXT,
   transcript_path TEXT,
   duracion_seg    REAL,
@@ -195,7 +257,23 @@ CREATE VIRTUAL TABLE segments_fts USING fts5(
 user_version` para migraciones), las inserciones y las consultas. Los demás
 scripts no escriben SQL suelto.
 
-### 1.2 El LLM devuelve JSON, no Markdown
+### 1.2 Prompts por tipo de reunión
+
+Flag `--tipo {daily,workshop,retro,planning}` en `summarize_teams.py`, **daily
+por defecto** (el prompt actual, sin cambios de comportamiento). Cada tipo
+tiene su plantilla, porque las secciones útiles no son las mismas:
+
+- **daily**: por persona / acciones / bloqueos (lo actual).
+- **retro**: qué fue bien, qué no, acciones de mejora acordadas.
+- **planning**: alcance comprometido, estimaciones, dudas abiertas.
+- **workshop**: temas tratados, decisiones, preguntas sin resolver.
+
+Las plantillas viven en un diccionario en `summarize_teams.py` (o en
+`prompts/*.md` si crecen). El esquema JSON de salida se mantiene común salvo
+la sección específica de cada tipo, para que la BD y los informes no tengan
+que saber de tipos.
+
+### 1.3 El LLM devuelve JSON, no Markdown
 
 `summarize_teams.py` cambia de estrategia: pide al modelo un objeto JSON con
 un esquema fijo, y el Markdown pasa a **renderizarse desde ese JSON** en
@@ -379,7 +457,7 @@ reuniones juntas no caben en la ventana del modelo local. Se necesita:
 
 | Orden | Fase | Esfuerzo | Riesgo | Desbloquea |
 |---|---|---|---|---|
-| 1 | Fase 0 — Glosario | Bajo | Nulo | Calidad de todo lo demás |
+| ~~1~~ | ~~Fase 0 — Glosario~~ **hecha** | Bajo | Nulo | Calidad de todo lo demás |
 | 2 | Fase 1 — JSON + SQLite | Medio | Bajo | Fases 2, 4, 5 |
 | 3 | Fase 2 — Arrastres | Bajo | Bajo | El valor de gestión |
 | 4 | Fase 4 — `ask_teams.py` | Medio | Bajo | Consulta del histórico |
@@ -402,9 +480,16 @@ funcionando igual si se ignoran los flags nuevos.
   directo, sin tocar SQLite).
 - Se añade un modo `--importar` que ingesta transcripciones y resúmenes ya
   existentes en `grabaciones/` para no empezar la BD vacía.
-- El flujo de dos máquinas se mantiene: `datos/meetings.db` vive donde se
-  ejecuta el resumen. Si transcripción y resumen ocurren en máquinas
-  distintas, se copia el `.txt` como hasta ahora; la BD no viaja.
+- **La BD vive en el servidor Linux con GPU** (decisión tomada). Implica que
+  `summarize_teams.py`, `ask_teams.py` y `report_teams.py` se ejecutan allí, y
+  que LiteLLM debe ser accesible desde el servidor (`--base-url`, ya que el
+  valor por defecto `localhost:4000` asume que el proxy corre en la misma
+  máquina). El portátil Windows solo graba y envía el `.wav`.
+- `datos/glosario.md` tiene que existir **también en el servidor**: lo usan
+  tanto la transcripción como el resumen. Al no versionarse, hay que copiarlo
+  a mano igual que los modelos (ver `DEPLOY_OFFLINE.md`).
+- La ruta de la BD será configurable con `--db` / variable de entorno, para no
+  quedar atados a esta decisión.
 
 ## 6. Privacidad y aviso legal
 
@@ -427,11 +512,14 @@ guarda y cuánto tiempo es tuya.
 
 ## 7. Cuestiones abiertas
 
-1. ¿Se procesan solo dailys, o también otro tipo de reuniones? Afecta al
-   prompt (hoy está muy especializado en dailys) y sugeriría un campo `tipo`
-   en `meetings` con plantillas de prompt por tipo.
-2. ¿La BD debe vivir en el PC Windows o en el servidor Linux? Cambia dónde se
-   ejecuta `summarize_teams.py`.
-3. ¿Interesa exportar las acciones abiertas a Planner/Jira, o el Markdown es
-   suficiente? En la transcripción se menciona "subir documentos al planner".
-4. Umbral de similitud de voz: hay que calibrarlo con grabaciones reales.
+Las cuatro cuestiones iniciales están resueltas en la sección 0, salvo el
+umbral de similitud de voz, que no es una decisión sino una medición: hay que
+calibrarlo contra grabaciones reales al abordar la Fase 3.
+
+Quedan pendientes de decidir, más adelante:
+
+1. Política de retención de audio y transcripciones (sección 6).
+2. Si `ask_teams.py` se usará por SSH contra el servidor o conviene un modo
+   cliente/servidor mínimo.
+3. Si la sección "Dudosos" del glosario debe alimentarse automáticamente:
+   detectar términos que el LLM marca como no claros y proponerlos.

@@ -49,9 +49,16 @@ Ya están cacheados en este PC en:
 ```
 Cópialos tal cual (son ficheros `.pt`, independientes del SO).
 
-### d) El script de transcripción
+### d) Los scripts y el glosario
 
-Copia `transcribe_teams.py` de este proyecto.
+Copia de este proyecto:
+
+- `transcribe_teams.py`
+- `glosario.py` — módulo que `transcribe_teams.py` importa. **Sin él, el
+  script no arranca** (`ModuleNotFoundError: glosario`).
+- `datos/glosario.md` — el glosario del proyecto. Es opcional (sin él se
+  transcribe igual, solo que sin sesgo de vocabulario), pero **no está en
+  git**, así que hay que copiarlo a mano en cada actualización.
 
 ## 2. Transferir al servidor
 
@@ -59,7 +66,13 @@ Copia (USB, `scp`, red interna...) al servidor Ubuntu:
 - la carpeta `wheelhouse/` completa
 - el binario `ffmpeg`
 - los `.pt` de los modelos
-- `transcribe_teams.py`
+- `transcribe_teams.py` y `glosario.py`, en el mismo directorio
+- `datos/glosario.md`
+
+`glosario.py` busca por defecto `datos/glosario.md` **relativo a su propia
+ubicación**, así que si respetas esa estructura (`glosario.py` y la carpeta
+`datos/` hermanas) se detecta solo. Si lo dejas en otro sitio, indícalo con
+`--glosario /ruta/al/glosario.md`.
 
 ## 3. Instalar y configurar en el servidor (sin internet)
 
@@ -93,6 +106,11 @@ python transcribe_teams.py mixed.wav --model large-v3 --device cuda --language e
 `transcribe_teams.py` detecta automáticamente la GPU si no se indica
 `--device`, así que también funciona sin especificarlo. Con una L4 y el
 modelo `large-v3`, la transcripción será mucho más rápida que en CPU.
+
+En el arranque el script imprime `Glosario: si/no`. Si dice `no` y esperabas
+que sí, es que no encuentra `datos/glosario.md`: compruébalo con
+`--glosario /ruta/explicita/glosario.md`. Para desactivarlo a propósito,
+`--sin-glosario`.
 
 ## Notas
 

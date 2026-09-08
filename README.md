@@ -144,6 +144,32 @@ de la conversación (o de `--attendees` si se lo indicas) — conviene
 revisar el mapeo, puede equivocarse o marcar "no identificado" si no hay
 contexto suficiente.
 
+## Glosario del proyecto (opcional, muy recomendable)
+
+Whisper destroza sistemáticamente las siglas y nombres propios que no conoce
+("Goverity" por Coverity). Para evitarlo, copia `datos/glosario.ejemplo.md` a
+`datos/glosario.md` y rellénalo con el vocabulario de tu equipo:
+
+```powershell
+copy datos\glosario.ejemplo.md datos\glosario.md
+```
+
+A partir de ahí, `transcribe_teams.py` y `summarize_teams.py` lo usan solos:
+
+- La sección entre `<!-- whisper -->` y `<!-- /whisper -->` se pasa a Whisper
+  como `initial_prompt` y sesga el reconocimiento hacia esos términos. Está
+  limitada a unos 700 caracteres (~224 tokens, tope del parámetro), así que
+  deja ahí solo lo más importante.
+- El documento **entero** se inyecta en el prompt del LLM al resumir, para que
+  corrija los términos que Whisper haya deformado.
+
+Opciones en ambos scripts: `--glosario RUTA` para usar otro fichero,
+`--sin-glosario` para desactivarlo.
+
+`datos/` está en `.gitignore`: el glosario contiene nombres de personas y jerga
+interna, y no debe versionarse. Si transcribes en otra máquina (ver
+`DEPLOY_OFFLINE.md`), cópialo también allí.
+
 ## Notas técnicas
 
 - La captura del audio del sistema solo produce datos mientras el motor de

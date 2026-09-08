@@ -23,6 +23,10 @@ Notas:
     medium, large. En CPU, usa "small" o inferior si quieres resultados
     razonablemente rapidos; en GPU (CUDA) puedes usar "medium"/"large" sin
     problema.
+  - Si existe `datos/glosario.md` se usa automaticamente para sesgar el
+    reconocimiento hacia las siglas y nombres del proyecto (initial_prompt de
+    Whisper). Usa --glosario RUTA para otro fichero o --sin-glosario para
+    desactivarlo. Ver datos/glosario.ejemplo.md.
   - Si no se indica --device, se detecta automaticamente si hay GPU CUDA
     disponible (torch.cuda.is_available()) y si no, usa CPU.
   - --diarize requiere el paquete `pyannote.audio` (no incluido por defecto,
@@ -39,6 +43,8 @@ import wave
 from pathlib import Path
 
 import numpy as np
+
+import glosario as glosario_mod
 
 # La consola de Windows suele usar cp1252/cp850, que no soporta todos los
 # caracteres que puede producir Whisper (acentos, alfabetos no latinos, etc.).
@@ -74,6 +80,47 @@ def write_txt(segments, path: Path) -> None:
     with open(path, "w", encoding="utf-8") as f:
         for seg in segments:
             f.write(_segment_label(seg) + "\n")
+
+
+def colapsar_repeticiones(segments, maximo: int = 2, ventana: int = 10) -> int:
+    """Elimina bucles de repeticion de Whisper. Modifica la lista en sitio y
+    devuelve cuantos segmentos se han eliminado.
+
+    Whisper entra en bucle sobre silencio o ruido (tipicamente al final del
+    audio), y `carry_initial_prompt` lo realimenta. Se distinguen dos casos
+    para no destruir repeticiones legitimas:
+
+    - Textos cortos ("Vale.", "Gracias."): son normales en una conversacion,
+      asi que solo se recortan si aparecen mas de `maximo` veces SEGUIDAS.
+    - Frases largas (4 palabras o mas): que se repitan identicas dentro de una
+      ventana de `ventana` segmentos no pasa en una conversacion real, asi que
+      basta una repeticion cercana para considerarlo artefacto. Se mira la
+      ventana y no solo el segmento anterior porque el bucle suele venir
+      salpicado de lineas sueltas que rompen la racha.
+    """
+    salida = []
+    anterior = None
+    seguidas = 0
+    for seg in segments:
+        clave = seg["text"].strip().lower()
+        largo = len(clave.split()) >= 4
+
+        if largo:
+            recientes = [s["text"].strip().lower() for s in salida[-ventana:]]
+            if clave in recientes:
+                continue
+        else:
+            seguidas = seguidas + 1 if clave == anterior else 1
+            if seguidas > maximo:
+                anterior = clave
+                continue
+
+        anterior = clave
+        salida.append(seg)
+
+    eliminados = len(segments) - len(salida)
+    segments[:] = salida
+    return eliminados
 
 
 def _load_waveform(path: Path):
@@ -199,6 +246,30 @@ def main() -> None:
         help="Token de acceso de HuggingFace para descargar el modelo de pyannote (o usa la variable de entorno HF_TOKEN)",
     )
     parser.add_argument(
+        "--glosario",
+        default=None,
+        help="Ruta al glosario del proyecto, para sesgar el reconocimiento de "
+        "siglas y nombres propios (por defecto: datos/glosario.md si existe)",
+    )
+    parser.add_argument(
+        "--sin-glosario",
+        action="store_true",
+        help="No usar el glosario aunque exista datos/glosario.md",
+    )
+    parser.add_argument(
+        "--sin-carry",
+        action="store_true",
+        help="No reinyectar el glosario en cada ventana de 30s de Whisper "
+        "(por defecto se reinyecta; sin esto, el glosario solo afecta al "
+        "primer fragmento del audio y su efecto se diluye)",
+    )
+    parser.add_argument(
+        "--sin-limpieza",
+        action="store_true",
+        help="No eliminar los bucles de repeticion de Whisper (segmentos "
+        "identicos consecutivos repetidos mas de dos veces)",
+    )
+    parser.add_argument(
         "--num-speakers",
         type=int,
         default=None,
@@ -226,6 +297,21 @@ def main() -> None:
         )
         sys.exit(1)
 
+    # El glosario es opcional: si no se pasa --glosario y no existe el fichero
+    # por defecto, se transcribe sin initial_prompt (comportamiento anterior).
+    # Pero si se pide uno explicitamente y no esta, es un error del usuario.
+    initial_prompt = None
+    if not args.sin_glosario:
+        if args.glosario and not Path(args.glosario).exists():
+            print(
+                f"Error: no se encuentra el glosario '{args.glosario}'",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        contenido = glosario_mod.cargar(args.glosario)
+        if contenido:
+            initial_prompt = glosario_mod.prompt_whisper(contenido)
+
     import whisper
 
     device = detect_device(args.device)
@@ -234,12 +320,56 @@ def main() -> None:
     print(f"Modelo:     {args.model}")
     print(f"Dispositivo: {device}")
     print(f"Idioma:     {language or 'autodetectar'}")
+    # Whisper solo inyecta `initial_prompt` en la PRIMERA ventana de 30s; a
+    # partir de ahi el contexto de cada ventana es el texto ya transcrito
+    # (condition_on_previous_text), asi que el glosario se diluye y solo
+    # corrige a ratos. `carry_initial_prompt` lo reinyecta en cada ventana.
+    # `carry_initial_prompt` existe desde openai-whisper 20240930; el servidor
+    # offline puede tener una version anterior, en cuyo caso pasarlo seria un
+    # TypeError. Se detecta en vez de asumirlo.
+    import inspect
+
+    from whisper.transcribe import transcribe as _whisper_transcribe
+
+    carry_soportado = (
+        "carry_initial_prompt" in inspect.signature(_whisper_transcribe).parameters
+    )
+    carry = bool(initial_prompt) and not args.sin_carry and carry_soportado
+    if initial_prompt and not args.sin_carry and not carry_soportado:
+        print(
+            "Aviso: esta version de openai-whisper no soporta "
+            "carry_initial_prompt (requiere 20240930 o posterior). El glosario "
+            "solo afectara al primer fragmento del audio.",
+            file=sys.stderr,
+        )
+    if carry:
+        estado_glosario = "si (reinyectado en cada ventana)"
+    elif initial_prompt:
+        estado_glosario = "si (solo primera ventana)"
+    else:
+        estado_glosario = "no"
+    print(f"Glosario:   {estado_glosario}")
     print(f"Cargando modelo Whisper '{args.model}' (puede tardar la primera vez, se descarga)...")
 
     model = whisper.load_model(args.model, device=device)
 
     print(f"Transcribiendo '{audio_path.name}'... (puede tardar varios minutos en CPU)")
-    result = model.transcribe(str(audio_path), language=language, verbose=False)
+    extra = {"carry_initial_prompt": True} if carry else {}
+    result = model.transcribe(
+        str(audio_path),
+        language=language,
+        verbose=False,
+        initial_prompt=initial_prompt,
+        **extra,
+    )
+
+    if not args.sin_limpieza:
+        eliminados = colapsar_repeticiones(result["segments"])
+        if eliminados:
+            print(
+                f"Limpieza: {eliminados} segmento(s) eliminado(s) por "
+                f"repeticion en bucle (usa --sin-limpieza para conservarlos)."
+            )
 
     out_dir = Path(args.output_dir) if args.output_dir else audio_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
