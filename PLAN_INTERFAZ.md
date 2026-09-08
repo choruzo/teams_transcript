@@ -20,6 +20,8 @@ lenguaje natural). Este define la *cara*: una aplicación web local que consuma
 | Riesgos sin estado (D3) | **Redefinir la métrica**, no el esquema | La interfaz muestra "riesgos mencionados en el periodo", que es lo que el dato dice de verdad. No se promete "riesgos abiertos" |
 | Tests | **Sí**: `unittest` de la stdlib sobre `memoria.py` y la API, contra una BD temporal | Cambio en el modo de trabajo del repo. Sin pytest ni dependencias nuevas. Prioridad en las escrituras y los `overrides` |
 | Primer paso | **D0**, la deuda del motor, antes de escribir una línea de web | `uid` estable, rutas de audio, conexión de solo lectura y WAL en `memoria.py` |
+| Despliegue en el servidor cerrado | **La imagen se construye y prueba en el portátil y se exporta con `docker save`**; en el servidor solo `docker load` | Nada de `build:` en el `docker-compose.yml`, tag versionado, `pull_policy: never`, imagen base por digest y versiones exactas (sección 5) |
+| Qué va dentro de la imagen | **Solo Python y las dependencias.** El código de la aplicación va por *bind mount* | Cambiar el front cuesta un `scp` de kilobytes, no reexportar 200 MB. La imagen solo se rehace si cambia `requirements-api.txt` |
 
 ## 1. Objetivo
 
@@ -113,7 +115,11 @@ teams_transcript/
       lib/                 three.min.js y demás, vendorizados (sin CDN)
   docker/                  NUEVO
     Dockerfile
+    exportar.ps1           construye y empaqueta para el servidor cerrado
+    DESPLIEGUE.md          los comandos a ejecutar alli
   docker-compose.yml       NUEVO
+  dist/                    NUEVO  - .gitignore: el .tar de la imagen
+  .gitattributes           NUEVO  - LF forzado en *.sh, Dockerfile, *.yml
   requirements-api.txt     NUEVO
   tests/                   NUEVO  - unittest de la stdlib, sin pytest
     test_memoria.py
@@ -382,42 +388,142 @@ Detalles no negociables:
   "LiteLLM no responde" en vez de "algo ha fallado".
 - **Sin CORS abierto**: mismo origen vía el proxy de nginx.
 
-## 5. Docker
+## 5. Docker y despliegue en un servidor sin internet
 
-`docker-compose.yml` con un servicio y un volumen que monta `./datos` y
-`./grabaciones` desde el host.
+**Restricción de partida:** el servidor Ubuntu **no tiene salida a internet**.
+La imagen se construye y se prueba en el portátil Windows (que sí la tiene) y
+se exporta como fichero. En el servidor **nunca se ejecuta `docker build`**: no
+podría descargar ni la imagen base ni las dependencias.
+
+Condiciones confirmadas: el servidor tiene **Docker Engine y compose v2**, hay
+**red interna** para `scp` (aunque no salida a internet) y **la estructura del
+proyecto es la misma** en ambas máquinas, así que las rutas relativas del
+`docker-compose.yml` valen tal cual. El portátil construye `linux/x86_64`, que
+es la arquitectura del servidor.
+
+### 5.1 El reparto: imagen estable, código móvil
+
+La decisión que hace esto llevadero es **no meter el código en la imagen**:
+
+| Qué | Dónde vive | Cómo se actualiza | Cada cuánto |
+|---|---|---|---|
+| Python + dependencias (FastAPI, uvicorn…) | dentro de la imagen | `docker save` → `scp` → `docker load` (~200 MB) | casi nunca: solo si cambia `requirements-api.txt` |
+| `api/`, `web/`, `memoria.py`, `ask_teams.py`… | bind mount desde el disco del servidor | `scp` de ficheros de texto + reiniciar | a diario |
+| `datos/`, `grabaciones/` | bind mount, nunca en la imagen | los genera el pipeline en el servidor | continuamente |
+
+Así, cambiar una línea de CSS o un endpoint cuesta un `scp` de unos kilobytes,
+no reexportar y transferir la imagen entera. **Nada del código de la aplicación
+se hornea en la imagen**, ni siquiera como copia de respaldo: dos versiones del
+mismo fichero (una dentro, otra montada encima) es una fuente de confusión
+garantizada el día que el bind mount falle en silencio.
+
+### 5.2 `docker-compose.yml`
+
+Un solo servicio. Sin clave `build:`, que en el servidor solo puede fallar:
 
 ```yaml
 # esbozo, no definitivo
 services:
   api:
-    build: {context: ., dockerfile: docker/Dockerfile}
+    image: teams-transcript-api:0.1.0   # tag fijo y versionado, nunca :latest
+    pull_policy: never                  # no intentes ir a ningun registro
     environment:
-      TEAMS_DB: /datos/meetings.db
+      TEAMS_DB: /app/datos/meetings.db
+      TEAMS_API_SOLO_LECTURA: "1"
       LITELLM_BASE_URL: http://host.docker.internal:4000/v1
       LITELLM_API_KEY: ${LITELLM_API_KEY}
-      AUDIO_RAIZ_HOST: /home/usuario/teams_transcript/grabaciones
-      AUDIO_RAIZ_LOCAL: /grabaciones
+      # La BD guarda rutas absolutas de la maquina que proceso la reunion;
+      # dentro del contenedor el proyecto esta en /app (deuda D2, resuelta).
+      TEAMS_RAIZ_ORIGEN: ${TEAMS_RAIZ_ORIGEN}
+      TEAMS_RAIZ_LOCAL: /app
     volumes:
-      - ./datos:/datos
-      - ./grabaciones:/grabaciones:ro
+      - ./api:/app/api:ro
+      - ./web:/app/web:ro
+      - ./memoria.py:/app/memoria.py:ro
+      - ./datos:/app/datos                # lectura y escritura: WAL, y I6
+      - ./grabaciones:/app/grabaciones:ro
     ports: ["127.0.0.1:8080:8000"]
+    extra_hosts: ["host.docker.internal:host-gateway"]   # LiteLLM, en Linux
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/api/salud')"]
+      interval: 30s
 ```
 
-Puntos de atención:
+`pull_policy: never` y el tag versionado son deliberados: sin ellos, un
+despliegue en el que la imagen no se cargó bien no falla claramente, sino que
+se queda intentando contactar con Docker Hub hasta agotar el tiempo de espera.
 
-- **La BD vive en el host, no en la imagen.** El contenedor la monta. Nunca se
-  copia `datos/` dentro de una imagen: contiene texto literal de reuniones
-  internas.
-- **Imagen base sin GPU ni PyTorch.** La API solo lee SQLite y hace HTTP; no
-  necesita `torch`, y meterlo multiplicaría por veinte el tamaño de la imagen.
-- **Construcción sin red** para el servidor offline: hay que poder construir a
-  partir de wheels descargadas previamente (`pip install --no-index
-  --find-links=vendor/`), en la línea de lo que ya hace `DEPLOY_OFFLINE.md`.
-- **`LITELLM_API_KEY` por variable de entorno o fichero `.env`**, nunca en la
-  imagen ni en el repo. `.env` a `.gitignore`.
-- Publicar en `127.0.0.1:8080` por defecto y no en `0.0.0.0`, salvo decisión
-  explícita (ver sección 6).
+**`:latest` está prohibido.** Con `docker load` no hay forma de saber qué
+versión trajo el tar si todas se llaman igual, y una imagen vieja que se queda
+en el servidor pasa desapercibida.
+
+### 5.3 El paquete de exportación
+
+Un script (`docker/exportar.ps1`) que produce, en `dist/` (fuera del control de
+versiones):
+
+```
+teams-transcript-api-0.1.0.tar     imagen: docker save
+SHA256SUMS.txt                     para verificar la transferencia
+DESPLIEGUE.md                      los cuatro comandos a ejecutar en el servidor
+```
+
+Y en el servidor, todo el procedimiento:
+
+```bash
+sha256sum -c SHA256SUMS.txt
+docker load -i teams-transcript-api-0.1.0.tar
+docker compose up -d
+docker compose logs -f api        # comprobar que arranca
+```
+
+Detalles que evitan sorpresas:
+
+- **`--platform linux/amd64` explícito** en el build, sin depender del valor
+  por defecto del Docker Desktop del portátil.
+- **Imagen base fijada por digest** (`python:3.12-slim@sha256:…`), no por
+  etiqueta: `3.12-slim` apunta a una imagen distinta cada mes, y en un entorno
+  cerrado la reproducibilidad es lo único que permite reconstruir con garantías
+  seis meses después.
+- **Versiones exactas** en `requirements-api.txt` (`==`, no `>=`), por lo
+  mismo.
+- **Sin `apt-get install`** en el `Dockerfile` si se puede evitar: la API solo
+  necesita Python y SQLite, que ya vienen en la imagen base.
+- **Imagen sin GPU ni PyTorch**: la API lee SQLite y hace HTTP. Meter `torch`
+  multiplicaría por veinte el tamaño del fichero a transferir.
+- El `.tar` y `dist/` van a `.gitignore`.
+
+### 5.4 Probar aquí lo que correrá allí
+
+El objetivo es que el portátil sea un entorno de pruebas fiel, y hay dos
+diferencias que no lo son:
+
+1. **SQLite en modo WAL sobre un bind mount de Windows.** Docker Desktop expone
+   el disco de Windows al contenedor a través de una capa de red (9p/virtiofs)
+   que no da las mismas garantías de bloqueo que un bind mount nativo de Linux.
+   Puede fallar aquí y funcionar allí, o —peor— parecer que funciona. **Las
+   pruebas de concurrencia con la base de datos no son concluyentes en
+   Windows**; hay que repetirlas en el servidor tras el primer despliegue.
+2. **Fin de línea.** El repo se edita en Windows y git convierte a CRLF al
+   sacar los ficheros a disco. Un `.sh` con CRLF dentro del contenedor falla
+   con un `bad interpreter` incomprensible. Conviene un `.gitattributes` que
+   fuerce LF en `*.sh`, `Dockerfile` y `*.yml`.
+
+Y una que sí es fiel y conviene aprovechar: **la base de datos real está en
+este portátil** (una reunión, 145 segmentos), con rutas de audio en formato
+Windows. Es el caso de prueba perfecto para el remapeo `TEAMS_RAIZ_*`, porque
+es exactamente lo que la API se encontrará al leer una fila procesada en otra
+máquina.
+
+### 5.5 Seguridad del paquete
+
+- **`LITELLM_API_KEY` nunca en la imagen ni en el repo**: fichero `.env` en el
+  servidor, en `.gitignore`.
+- **`datos/` jamás dentro de una imagen.** Contiene el texto literal de las
+  reuniones. Una imagen es un fichero que se copia, se comparte y se olvida en
+  un disco; la base de datos se monta, no se hornea.
+- Publicar en `127.0.0.1:8080`, no en `0.0.0.0` (sección 6).
 
 ## 6. Seguridad y privacidad
 
@@ -500,9 +606,12 @@ duplicándola.
   (aunque el `id` cambie), la API puede leer la BD mientras
   `summarize_teams.py` escribe, y un `GET` no puede modificar el fichero. Con
   sus tests.
-- **I0**: `docker compose up` levanta la aplicación en un equipo limpio y la
-  página lista las reuniones reales de `datos/meetings.db`, sin acceso a
-  internet durante el arranque.
+- **I0**: en el portátil, `docker compose up` levanta la aplicación y la página
+  lista las reuniones reales de `datos/meetings.db`. Y, lo que de verdad
+  importa: el paquete exportado se carga en el servidor con `docker load` y
+  arranca **sin ejecutar `build` ni contactar con ningún registro** —
+  comprobable desconectando la red del portátil antes de probarlo—, sirviendo
+  el audio de una reunión cuya fila lleva rutas de otra máquina.
 - **I1**: el timeline muestra las reuniones del último mes con sus carriles de
   acción; una acción con tres menciones se ve claramente como una barra que
   cruza tres reuniones.
