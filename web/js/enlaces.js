@@ -12,3 +12,22 @@ export const urlReunion = (uid) => `/reunion.html?uid=${encodeURIComponent(uid)}
 export const urlSegmento = (uid, idx) => `${urlReunion(uid)}#${idSegmento(idx)}`;
 
 export const idSegmento = (idx) => `s-${idx}`;
+
+/**
+ * El tablero de acciones, con sus filtros en la dirección.
+ *
+ * Los filtros van en la URL y no en memoria de la página por la misma razón
+ * que el periodo del timeline: «las tres cosas que llevan un mes paradas» es
+ * algo que se pega en un chat, y una vista que no se puede enlazar no sirve
+ * para eso. `estado` es repetible.
+ */
+export function urlAcciones(filtros = {}) {
+  const parametros = new URLSearchParams();
+  for (const [clave, valor] of Object.entries(filtros)) {
+    if (valor === null || valor === undefined || valor === "") continue;
+    if (Array.isArray(valor)) valor.forEach((uno) => parametros.append(clave, uno));
+    else parametros.set(clave, valor);
+  }
+  const consulta = parametros.toString();
+  return consulta ? `/acciones.html?${consulta}` : "/acciones.html";
+}

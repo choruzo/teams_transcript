@@ -102,9 +102,9 @@ Reglas propias de esta capa:
 ## Vista de reunión (I2)
 
 La segunda página del front (`reunion.html`). No hay enrutado del lado del
-cliente: son dos ficheros estáticos y el navegador ya sabe ir de uno a otro; un
-router propio solo tendría sentido si hubiera estado que conservar entre
-vistas. Las direcciones del front viven en `js/enlaces.js`, como las del
+cliente: son ficheros estáticos (tres desde I3) y el navegador ya sabe ir de
+uno a otro; un router propio solo tendría sentido si hubiera estado que
+conservar entre vistas. Las direcciones del front viven en `js/enlaces.js`, como las del
 servidor viven en `js/api.js`, y siempre llevan el `uid` —nunca el `id`—
 porque el `id` cambia al reprocesar.
 
@@ -126,6 +126,42 @@ porque el `id` cambia al reprocesar.
    disco. El `.md` y el `.srt` originales viven en la máquina que procesó la
    reunión y, en cuanto I6 permita corregir datos, quedarán obsoletos sin que
    nadie los regenere.
+
+## Tablero de acciones (I3)
+
+La tercera página (`acciones.html`). Comparte cabecera, filtros y pie con las
+otras dos; lo propio de esta vista son tres cosas:
+
+1. **La tarjeta de acción vive en `js/vistas/acciones.js`, no en cada vista.**
+   La pintan el tablero y la vista de reunión, y una insignia que significara
+   cosas distintas según por dónde se llegue sería el peor fallo posible de una
+   herramienta cuyo valor es que todos miren el mismo dato. `vistas/reunion.js`
+   la importa de ahí y solo le pasa el `uid` de la reunión que se está mirando,
+   para que no se enlace a sí misma.
+2. **Los recuentos por estado son el filtro.** Un chip por estado con su
+   número, pulsable, calculado *sin* el filtro de estado: apagado dice cuántas
+   aparecerían al pulsarlo. Se pintan también los que están a cero —«no hay
+   nada bloqueado» es información— y solo se deshabilitan si además no están
+   pulsados, o no habría forma de soltar el filtro. Es la versión honesta de
+   las «columnas por estado» del plan: con cinco columnas paginadas por
+   separado, el tablero deja de leerse de un vistazo, que es lo único que
+   tiene que hacer.
+3. **Filtrar es navegar.** Cada cambio escribe los filtros en la URL y recarga:
+   «lo de Ana que lleva un mes parado» se pega en un chat y se abre igual.
+   Por eso los desplegables filtran al cambiar (valor de una lista cerrada) y
+   el campo de texto solo al enviar, y por eso el orden por defecto **no** va
+   en la dirección: es ruido en un enlace que se comparte.
+
+La lista se pagina acumulando (`Cargar N acciones más`, como la transcripción)
+y no con páginas numeradas: un tablero se recorre de arriba abajo. El orden lo
+decide el servidor, nunca un `sort` del navegador, que solo reordenaría la
+página cargada y mentiría sobre el resto.
+
+Y lo que esta vista **no** hace: cambiar estados, reasignar o fusionar
+duplicados. Eso es I6 y necesita la tabla `overrides`; sin ella, la siguiente
+pasada de `summarize_teams.py` se llevaría la corrección por delante. La nota
+bajo el encabezado lo dice en pantalla, junto con el alcance del dato: el
+estado es el de hoy y el umbral de ESTANCADA es el mismo del `.md`.
 
 ## Decir lo que el dato soporta
 

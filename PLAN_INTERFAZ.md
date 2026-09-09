@@ -1,7 +1,7 @@
 # Plan de interfaz: de "scripts" a "memoria del equipo consultable"
 
 Redactado el 2026-09-08. **Fases D0, I0 e I1 implementadas** (2026-09-08) e
-**I2** (2026-09-09); el resto es propuesta.
+**I2 e I3** (2026-09-09); el resto es propuesta.
 
 Documento complementario de [`PLAN_MEJORAS.md`](PLAN_MEJORAS.md). Aquel define
 el *motor* (glosario, JSON estructurado, SQLite, arrastres, consulta en
@@ -580,7 +580,7 @@ pendientes de decidir, y ninguna bloquea el arranque:
 | ~~1~~ | ~~**I0 — Esqueleto**~~ **hecha** | FastAPI + Docker + `/api/salud` + `/api/reuniones` + una página que las liste | Bajo | D0 |
 | ~~2~~ | ~~**I1 — Timeline y métricas**~~ **hecha** | 3.1 y 3.2 en SVG, filtros en la URL | Medio | I0 |
 | ~~3~~ | ~~**I2 — Vista de reunión**~~ **hecha** | 3.3 sin audio: resumen, secciones, transcripción | Bajo | I0 |
-| 4 | **I3 — Tablero de acciones** | 3.4 en solo lectura, con badge de estancamiento | Bajo | I0 |
+| ~~4~~ | ~~**I3 — Tablero de acciones**~~ **hecha** | 3.4 en solo lectura, con badge de estancamiento | Bajo | I0 |
 | 5 | **I4 — Búsqueda** | FTS5 con resaltado, atajo global de teclado | Bajo | I0 |
 | 6 | **I5 — Chat** | 3.5 con SSE y citas navegables | Medio | **Fase 4 del motor (`ask_teams.py`)** |
 | 7 | **I6 — Corrección humana** | 3.6 completo: tabla `overrides` reaplicada, migración a esquema 2, y sus tests | **Alto** | I2, I3, D0 |
@@ -904,6 +904,83 @@ y el bloque de transcripción ni siquiera aparece.
 (es la fase I7), y la transcripción sin marcas de tiempo (D9) solo se ha
 verificado con tests, porque en la base de demostración no hay ninguna
 reunión así.
+
+---
+
+## 9 sexies. Resultado de I3 (2026-09-09)
+
+Ficheros nuevos: `web/acciones.html`, `web/js/acciones.js`,
+`web/js/vistas/acciones.js` y `api/rutas/acciones.py`. En `memoria.py`, la
+consulta del tablero y sus dos recuentos (`listar_acciones`,
+`contar_acciones`, `acciones_por_estado`, `responsables_de_acciones`) más la
+función `sin_acentos`; en `tests/`, 22 pruebas más (96 en total).
+
+Un solo endpoint: `GET /api/acciones`, con `estado` (repetible), `persona`,
+`q`, `estancadas`, `desde`, `hasta`, `dias_sin_tocar`, `orden` y paginación.
+
+Decisiones y hallazgos:
+
+1. **Una lista filtrable, no cinco columnas.** El plan dejaba abierto
+   «columnas por estado o tabla ordenable». Con columnas, cada una necesita su
+   propia paginación y su propio scroll, y el tablero deja de leerse de un
+   vistazo —que es lo único que tiene que hacer—. Lo que se ha hecho es una
+   lista ordenada por prioridad (estancadas primero) con los **recuentos por
+   estado como filtro**: la información de las columnas está, y sin cinco
+   listas creciendo por su cuenta.
+2. **Los recuentos que alimentan un control se calculan sin ese control.**
+   `por_estado` ignora el filtro de estado y `responsables` el de persona. Si
+   no, el chip pulsado enseña su propio número y los demás a cero, y no hay
+   forma de ver a dónde lleva cambiarlo. Los otros filtros sí se respetan: con
+   un responsable sin acciones, «2 abiertas» sería mentir sobre lo que se está
+   mirando.
+3. **La tarjeta de acción se ha extraído a `js/vistas/acciones.js`** y la vista
+   de reunión la importa de ahí. Era la duplicación con más consecuencias del
+   front: dos copias de las insignias significan que el mismo dato se lee
+   distinto según por dónde se llegue. De paso, las dos vistas ganaron el
+   nombre de la reunión en los enlaces («Retro del 18/08») en vez de una fecha
+   ISO suelta.
+4. **El filtro de texto ignora los acentos**, con una función `sin_acentos`
+   registrada en la conexión (`create_function`, válida también en
+   `query_only`). Es lo mismo que hace el tokenizador FTS5 con
+   `remove_diacritics 2`, así que la búsqueda de I4 no contradirá a este
+   filtro. Los comodines de `LIKE` se escapan: quien teclea «100 %» busca ese
+   texto.
+5. **El periodo se aplica por solapamiento**, igual que en los carriles del
+   timeline: entra lo que cruza el rango y no solo lo nacido dentro. La página
+   no expone `desde`/`hasta` a propósito —el tablero es el estado de hoy del
+   histórico entero, como las métricas de acciones de I1— pero la API los
+   acepta para I5 e I8.
+6. **Solo lectura, y dicho en pantalla.** Cambiar estado, reasignar o fusionar
+   es I6 y necesita `overrides`; hacerlo antes significaría que la siguiente
+   pasada de `summarize_teams.py` borra la corrección. La nota bajo el
+   encabezado dice eso y el alcance del dato: el estado es el de hoy y el
+   umbral de ESTANCADA es el mismo del `.md`.
+7. **`ORDER BY` interpolado, con lista blanca.** El orden entra en el SQL como
+   texto (un parámetro no puede ser una cláusula), así que un valor
+   desconocido cae en el de por defecto y nunca llega a la consulta; la API lo
+   rechaza además con un 422. Hay una prueba que lo comprueba con un intento de
+   inyección.
+
+Verificado:
+
+- **96 tests en verde** (52 de `memoria.py` + 44 de la API), con la suite
+  saltándose sola la parte de FastAPI donde no está instalado.
+- **En el navegador** (Chrome, vía el MCP de DevTools), contra dos bases de
+  demostración —27 y 208 acciones—: los cinco chips de estado y su alternancia,
+  los filtros de responsable, texto, antigüedad y «solo estancadas», los cuatro
+  órdenes, la paginación acumulativa (100 → 200 → 208 y el botón que
+  desaparece), el enlace a la reunión de origen y a la de la última mención,
+  tema claro y oscuro, ancho de móvil (420 px) sin desplazamiento horizontal y
+  **sin un solo mensaje en consola**. Se comprobó también que la vista de
+  reunión sigue igual tras extraerle la tarjeta.
+
+**Dos fallos encontrados al mirarlo:** el desplegable de orden salía en blanco
+cuando la URL no lo llevaba, diciendo que no había ninguno mientras la lista sí
+estaba ordenada; y con una reunión fechada en el futuro la tarjeta decía «-370
+días sin tocar», que ahora simplemente se calla.
+
+**Pendiente, menor:** el filtro de texto es un `LIKE` sobre la descripción, no
+FTS5 —eso es I4, y va sobre `segments`—, así que no hay stemming ni resaltado.
 
 ---
 

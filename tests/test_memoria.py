@@ -588,6 +588,199 @@ class TestConexionEntreHilos(BaseTemporal):
         hilo.join()
         self.assertIsInstance(fallo[0], sqlite3.ProgrammingError)
 
+class TestTableroDeAcciones(BaseTemporal):
+    """Las consultas del tablero (I3): filtrar, contar y ordenar.
+
+    Todo lo que la vista ensena sale de aqui, asi que lo que se comprueba es
+    justo lo que el plan pide de esa pantalla: que las estancadas se marquen
+    con el mismo umbral que el `.md`, que los recuentos de los filtros no
+    mientan y que un filtro mal escrito no devuelva una lista vacia.
+    """
+
+    def poblar(self):
+        conn = self.conectar()
+        self.junio = self.crear(conn, "/d/junio.txt", fecha="2026-06-01", titulo="Junio")
+        self.julio = self.crear(conn, "/d/julio.txt", fecha="2026-07-01", titulo="Julio")
+        memoria.insertar_acciones(
+            conn,
+            self.junio,
+            [
+                {"descripcion": "Revisar la migración de sesión", "persona": "Ana"},
+                {"descripcion": "Cerrar el ticket al 100 %", "persona": None},
+            ],
+        )
+        memoria.insertar_acciones(
+            conn, self.julio, [{"descripcion": "Preparar la demo", "persona": "Bea"}]
+        )
+        self.vieja, self.sin_duenio, self.nueva = [
+            fila["id"] for fila in conn.execute("SELECT id FROM actions ORDER BY id")
+        ]
+        # La de Ana se arrastra hasta julio y llega al umbral; la que no tiene
+        # responsable se quedo en junio y se cerro alli mismo.
+        conn.execute(
+            "UPDATE actions SET menciones = 3, meeting_id_ultima = ? WHERE id = ?",
+            (self.julio, self.vieja),
+        )
+        conn.execute(
+            "UPDATE actions SET estado = 'completada', cerrada_en = '2026-06-01'"
+            " WHERE id = ?",
+            (self.sin_duenio,),
+        )
+        conn.commit()
+        return conn
+
+    def ids(self, filas):
+        return sorted(fila["id"] for fila in filas)
+
+    def test_devuelve_el_tramo_y_los_titulos_de_las_dos_reuniones(self):
+        conn = self.poblar()
+        fila = memoria.listar_acciones(conn, estados=["abierta"])[0]
+        self.assertEqual(fila["id"], self.vieja)
+        self.assertEqual(fila["origen_titulo"], "Junio")
+        self.assertEqual(fila["ultima_titulo"], "Julio")
+        self.assertEqual(fila["origen_fecha"], "2026-06-01")
+        self.assertEqual(fila["ultima_fecha"], "2026-07-01")
+
+    def test_estancada_con_el_mismo_umbral_que_el_markdown(self):
+        conn = self.poblar()
+        estancadas = memoria.listar_acciones(conn, estancadas=True)
+        self.assertEqual(self.ids(estancadas), [self.vieja])
+        self.assertTrue(estancadas[0]["estancada"])
+        # La particion tiene que ser exacta: cada accion esta o no esta.
+        resto = memoria.listar_acciones(conn, estancadas=False)
+        self.assertEqual(self.ids(resto), sorted([self.sin_duenio, self.nueva]))
+
+    def test_una_cerrada_con_muchas_menciones_no_esta_estancada(self):
+        conn = self.poblar()
+        conn.execute("UPDATE actions SET menciones = 9 WHERE id = ?", (self.sin_duenio,))
+        conn.commit()
+        self.assertEqual(
+            self.ids(memoria.listar_acciones(conn, estancadas=True)), [self.vieja]
+        )
+
+    def test_texto_ignora_acentos_y_mayusculas(self):
+        conn = self.poblar()
+        for consulta in ("MIGRACION", "migración", "Sesion"):
+            with self.subTest(consulta=consulta):
+                self.assertEqual(
+                    self.ids(memoria.listar_acciones(conn, texto=consulta)),
+                    [self.vieja],
+                )
+
+    def test_los_comodines_del_texto_son_texto(self):
+        """Quien teclea "100 %" busca eso, no "lo que sea"."""
+        conn = self.poblar()
+        self.assertEqual(
+            self.ids(memoria.listar_acciones(conn, texto="100 %")), [self.sin_duenio]
+        )
+        self.assertEqual(memoria.listar_acciones(conn, texto="_____"), [])
+
+    def test_sin_responsable_es_un_filtro_propio(self):
+        conn = self.poblar()
+        self.assertEqual(
+            self.ids(memoria.listar_acciones(conn, persona=memoria.SIN_RESPONSABLE)),
+            [self.sin_duenio],
+        )
+        # Y el nombre no distingue mayusculas, como el resto del modulo.
+        self.assertEqual(
+            self.ids(memoria.listar_acciones(conn, persona="ana")), [self.vieja]
+        )
+
+    def test_dias_sin_tocar_cuenta_desde_la_ultima_mencion(self):
+        conn = self.poblar()
+        hoy = conn.execute("SELECT date('now')").fetchone()[0]
+        de_hoy = self.crear(conn, "/d/hoy.txt", fecha=hoy, titulo="Hoy")
+        conn.execute(
+            "UPDATE actions SET meeting_id_ultima = ? WHERE id = ?",
+            (de_hoy, self.nueva),
+        )
+        conn.commit()
+        dias = {f["id"]: f["dias_sin_tocar"] for f in memoria.listar_acciones(conn)}
+        self.assertEqual(dias[self.nueva], 0)
+        self.assertGreater(dias[self.vieja], 0)
+        # El filtro es "al menos N dias", asi que lo mencionado hoy se queda
+        # fuera y lo de hace meses entra.
+        pendientes = self.ids(memoria.listar_acciones(conn, dias_sin_tocar=1))
+        self.assertNotIn(self.nueva, pendientes)
+        self.assertIn(self.vieja, pendientes)
+
+    def test_el_periodo_incluye_lo_que_solapa(self):
+        """Una accion de junio que se menciono en julio cuenta en julio."""
+        conn = self.poblar()
+        self.assertIn(
+            self.vieja,
+            self.ids(memoria.listar_acciones(conn, desde="2026-06-15")),
+        )
+        self.assertNotIn(
+            self.nueva,
+            self.ids(memoria.listar_acciones(conn, hasta="2026-06-30")),
+        )
+
+    def test_contar_es_el_total_del_filtro_no_el_de_la_pagina(self):
+        conn = self.poblar()
+        self.assertEqual(memoria.contar_acciones(conn), 3)
+        self.assertEqual(len(memoria.listar_acciones(conn, limite=1)), 1)
+        self.assertEqual(memoria.contar_acciones(conn, estados=["abierta"]), 2)
+
+    def test_paginacion_sin_solapes_ni_huecos(self):
+        conn = self.poblar()
+        primera = memoria.listar_acciones(conn, limite=2)
+        segunda = memoria.listar_acciones(conn, limite=2, desplazamiento=2)
+        vistos = [f["id"] for f in primera] + [f["id"] for f in segunda]
+        self.assertEqual(sorted(vistos), sorted([self.vieja, self.sin_duenio, self.nueva]))
+
+    def test_los_recuentos_ignoran_su_propio_filtro(self):
+        """Un chip pulsado tiene que seguir diciendo a donde lleva soltarlo."""
+        conn = self.poblar()
+        por_estado = memoria.acciones_por_estado(conn, estados=["completada"])
+        self.assertEqual(por_estado["abierta"], 2)
+        self.assertEqual(por_estado["completada"], 1)
+        # Todos los estados aparecen: un cero explicito es informacion.
+        self.assertEqual(set(por_estado), set(memoria.ESTADOS_ACCION))
+        nombres = {
+            f["persona"]: f["n"]
+            for f in memoria.responsables_de_acciones(conn, persona="Ana")
+        }
+        self.assertEqual(nombres, {"Ana": 1, "Bea": 1, memoria.SIN_RESPONSABLE: 1})
+
+    def test_los_recuentos_si_respetan_los_demas_filtros(self):
+        conn = self.poblar()
+        por_estado = memoria.acciones_por_estado(conn, persona="Ana")
+        self.assertEqual(por_estado["abierta"], 1)
+        self.assertEqual(por_estado["completada"], 0)
+
+    def test_ordenes(self):
+        conn = self.poblar()
+        # Por defecto, lo estancado arriba.
+        self.assertEqual(memoria.listar_acciones(conn)[0]["id"], self.vieja)
+        antiguas = memoria.listar_acciones(conn, orden="antiguedad")
+        self.assertEqual(antiguas[-1]["id"], self.nueva)
+        recientes = memoria.listar_acciones(conn, orden="reciente")
+        self.assertEqual(recientes[-1]["id"], self.sin_duenio)
+        # Las que no tienen responsable van al final del orden por persona.
+        self.assertEqual(
+            memoria.listar_acciones(conn, orden="persona")[-1]["id"], self.sin_duenio
+        )
+
+    def test_un_orden_inventado_no_revienta_la_consulta(self):
+        """`memoria` no valida entradas de usuario: eso es cosa de la API.
+
+        Pero interpolar el ORDER BY obliga a que un valor desconocido caiga en
+        el de por defecto y no acabe dentro del SQL.
+        """
+        conn = self.poblar()
+        filas = memoria.listar_acciones(conn, orden="a.id; DROP TABLE actions")
+        self.assertEqual(len(filas), 3)
+        self.assertEqual(memoria.contar_acciones(conn), 3)
+
+    def test_el_tablero_se_puede_leer_en_solo_lectura(self):
+        """Es como lo abre la API, y el filtro de texto registra una funcion."""
+        self.poblar()
+        conn = self.conectar(solo_lectura=True)
+        self.assertEqual(
+            self.ids(memoria.listar_acciones(conn, texto="migracion")), [self.vieja]
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -8,8 +8,8 @@
 // nacida en esta reunión puede haber cambiado de estado en una posterior, y
 // entonces lo que se ve no coincide con el `.md` que se generó aquel día.
 
-import { duracion, escapar, fechaLarga, nombreEstado, plural } from "../formato.js";
-import { urlReunion } from "../enlaces.js";
+import { duracion, escapar, fechaLarga, plural } from "../formato.js";
+import { tarjetaAccion } from "./acciones.js";
 
 const chip = (texto, clase = "") =>
   `<span class="chip ${clase}">${escapar(texto)}</span>`;
@@ -97,48 +97,13 @@ function intervenciones(lista) {
   return panel("Por persona", `<ul class="intervenciones">${filas}</ul>`);
 }
 
-/**
- * Una acción, como tarjeta. `uidActual` sirve para dos cosas: no enlazar a la
- * reunión que ya se está mirando, y detectar que el estado que se muestra es
- * posterior a esta reunión.
- */
-function accion(a, uidActual) {
-  const marcas = [chip(nombreEstado(a.estado), `e-${a.estado}`)];
-  if (a.menciones > 1) marcas.push(chip(`×${a.menciones}`));
-  if (a.estancada) marcas.push(chip("ESTANCADA", "s-alta"));
-
-  const enlaces = [];
-  if (a.origen_uid !== uidActual) {
-    enlaces.push(
-      `nace en <a href="${urlReunion(a.origen_uid)}">${escapar(a.origen_fecha)}</a>`
-    );
-  }
-  // Si la última mención es otra reunión, el estado de arriba es el de *esa*
-  // pasada y no el de esta. Decirlo evita la lectura equivocada más fácil de
-  // esta vista.
-  if (a.ultima_uid !== uidActual) {
-    enlaces.push(
-      `última mención en <a href="${urlReunion(a.ultima_uid)}">${escapar(a.ultima_fecha)}</a>`
-    );
-  }
-
-  return `
-    <li class="accion">
-      <p class="descripcion">${escapar(a.descripcion)}</p>
-      <div class="meta">
-        <span class="persona">${escapar(a.persona || "sin responsable")}</span>
-        ${marcas.join("")}
-      </div>
-      ${a.comentario ? `<p class="comentario">${escapar(a.comentario)}</p>` : ""}
-      ${enlaces.length ? `<p class="tenue">${enlaces.join(" · ")}</p>` : ""}
-    </li>`;
-}
-
 function acciones(titulo, lista, uidActual, nota) {
   if (!lista.length) return panel(titulo, vacio("Ninguna."));
   const cuerpo =
     (nota ? `<p class="nota">${escapar(nota)}</p>` : "") +
-    `<ul class="acciones">${lista.map((a) => accion(a, uidActual)).join("")}</ul>`;
+    `<ul class="acciones">${lista
+      .map((a) => tarjetaAccion(a, { uidActual }))
+      .join("")}</ul>`;
   return panel(titulo, cuerpo);
 }
 

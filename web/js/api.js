@@ -6,7 +6,13 @@ const BASE = "/api";
 async function pedir(ruta, parametros = {}) {
   const url = new URL(BASE + ruta, window.location.origin);
   for (const [clave, valor] of Object.entries(parametros)) {
-    if (valor !== null && valor !== undefined && valor !== "") {
+    if (valor === null || valor === undefined || valor === "") continue;
+    // Un array se repite (`?estado=abierta&estado=bloqueada`), que es como
+    // FastAPI lee una lista. Un `set` con el array lo mandaría como una sola
+    // cadena separada por comas y el servidor no reconocería ningún estado.
+    if (Array.isArray(valor)) {
+      for (const uno of valor) url.searchParams.append(clave, uno);
+    } else {
       url.searchParams.set(clave, valor);
     }
   }
@@ -52,4 +58,7 @@ export const api = {
   // El timeline pide reuniones y carriles juntos: se dibujan sobre el mismo
   // eje y en dos peticiones habria un instante con la mitad del dibujo.
   timeline: (filtros) => pedir("/timeline", filtros),
+  // El tablero (I3). Devuelve la página **y** los recuentos con los que
+  // contrastarla, para que los controles de filtro sepan qué ofrecen.
+  acciones: (filtros) => pedir("/acciones", filtros),
 };

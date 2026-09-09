@@ -179,12 +179,13 @@ class Intervencion(BaseModel):
     proximos_pasos: str | None = None
 
 
-class AccionDeReunion(BaseModel):
-    """Una accion vista desde una reunion concreta.
+class Accion(BaseModel):
+    """Una accion del historico, en la unica forma en que la base la conoce.
 
-    `estado` y `menciones` son **los de hoy**, no los del dia de la reunion:
-    la base guarda un solo estado por accion (D10). La interfaz lo advierte
-    cuando la ultima mencion es posterior a la reunion que se esta mirando.
+    `estado` y `menciones` son siempre **los de hoy**: la base guarda un solo
+    estado por accion y ningun historial de por donde paso (D10). Quien la
+    muestre dentro de una reunion concreta tiene que decirlo, porque el `.md`
+    de aquel dia puede decir otra cosa.
     """
 
     id: int
@@ -198,6 +199,15 @@ class AccionDeReunion(BaseModel):
     origen_fecha: str
     ultima_uid: str
     ultima_fecha: str
+
+
+class AccionDeReunion(Accion):
+    """Una accion vista desde una reunion concreta.
+
+    La interfaz avisa de que el estado puede ser posterior cuando la ultima
+    mencion no es la reunion que se esta mirando.
+    """
+
     comentario: str | None = Field(
         None,
         description=(
@@ -270,3 +280,57 @@ class PaginaDeSegmentos(BaseModel):
         description="Si los segmentos devueltos traen marcas de tiempo"
     )
     segmentos: list[Segmento]
+
+
+# --------------------------------------------------------------------------
+# I3: tablero de acciones
+# --------------------------------------------------------------------------
+
+
+class AccionTablero(Accion):
+    """La misma accion, vista fuera de cualquier reunion.
+
+    Añade lo que ahi no hacia falta: el titulo de las dos reuniones (una fecha
+    suelta no dice a donde lleva el enlace cuando no se viene de ninguna
+    reunion) y los dias sin tocar, que es la pregunta de esta vista.
+    """
+
+    origen_titulo: str | None = None
+    ultima_titulo: str | None = None
+    dias_sin_tocar: int = Field(
+        description="Dias desde la ultima reunion que la menciono, hasta hoy"
+    )
+
+
+class Responsable(BaseModel):
+    """Un nombre para el desplegable, con cuantas acciones tiene.
+
+    No es `/api/personas` (fase I6, con alias y altas): aqui solo interesan
+    los que tienen algo bajo el filtro actual.
+    """
+
+    persona: str = Field(
+        description="El nombre, o el centinela de las acciones sin responsable"
+    )
+    n: int
+
+
+class PaginaDeAcciones(BaseModel):
+    """El tablero entero en una peticion: la pagina y con que contrastarla.
+
+    `por_estado` y `responsables` se calculan ignorando su propio filtro, para
+    que los controles sigan diciendo a donde lleva cambiarlos en vez de
+    reflejar lo ya elegido.
+    """
+
+    total: int = Field(description="Acciones que cumplen el filtro, no las devueltas")
+    limite: int
+    desplazamiento: int
+    orden: str
+    umbral_estancamiento: int
+    sin_responsable: str = Field(
+        description="Valor de `persona` que filtra las acciones sin dueño"
+    )
+    por_estado: dict[str, int]
+    responsables: list[Responsable]
+    acciones: list[AccionTablero]

@@ -580,6 +580,155 @@ class TestVistaDeReunion(BaseAPI):
         conn.close()
         self.assertEqual(self.detalle("lunes")["titulo"], "Daily del lunes (corregida)")
 
+class TestTablero(BaseAPI):
+    """El tablero de acciones (I3), en solo lectura.
+
+    Lo que se prueba aqui es el contrato con el front: que los filtros lleguen
+    a la consulta, que los recuentos que alimentan los controles no se filtren
+    a si mismos, y que un filtro mal escrito de un 422 con explicacion en vez
+    de una lista vacia -- que se leeria como "no hay nada que hacer".
+    """
+
+    def poblar_acciones(self):
+        conn = memoria.conectar(self.db)
+        junio = memoria.crear_reunion(
+            conn,
+            fecha="2026-06-01",
+            tipo="daily",
+            titulo="Junio",
+            transcript_path="/d/junio.txt",
+        )
+        julio = memoria.crear_reunion(
+            conn,
+            fecha="2026-07-01",
+            tipo="retro",
+            titulo="Julio",
+            transcript_path="/d/julio.txt",
+        )
+        memoria.insertar_acciones(
+            conn,
+            junio,
+            [
+                {"descripcion": "Revisar la migración de sesión", "persona": "Ana"},
+                {"descripcion": "Cerrar el ticket", "persona": None},
+            ],
+        )
+        memoria.insertar_acciones(
+            conn, julio, [{"descripcion": "Preparar la demo", "persona": "Bea"}]
+        )
+        conn.execute(
+            "UPDATE actions SET menciones = 3, meeting_id_ultima = ?"
+            " WHERE descripcion LIKE 'Revisar%'",
+            (julio,),
+        )
+        conn.execute(
+            "UPDATE actions SET estado = 'completada', cerrada_en = '2026-06-01'"
+            " WHERE descripcion LIKE 'Cerrar%'"
+        )
+        conn.commit()
+        conn.close()
+
+    def test_devuelve_la_pagina_y_con_que_contrastarla(self):
+        self.poblar_acciones()
+        datos = self.cliente.get("/api/acciones").json()
+        self.assertEqual(datos["total"], 3)
+        self.assertEqual(datos["orden"], "prioridad")
+        self.assertEqual(
+            datos["umbral_estancamiento"], memoria.UMBRAL_ESTANCAMIENTO
+        )
+        self.assertEqual(datos["sin_responsable"], memoria.SIN_RESPONSABLE)
+        self.assertEqual(set(datos["por_estado"]), set(memoria.ESTADOS_ACCION))
+        self.assertEqual(datos["por_estado"]["abierta"], 2)
+        # La estancada va primero, que es el orden por defecto del tablero.
+        primera = datos["acciones"][0]
+        self.assertTrue(primera["estancada"])
+        self.assertEqual(primera["origen_titulo"], "Junio")
+        self.assertEqual(primera["ultima_titulo"], "Julio")
+        self.assertGreater(primera["dias_sin_tocar"], 0)
+
+    def test_filtros(self):
+        self.poblar_acciones()
+
+        def total(**parametros):
+            respuesta = self.cliente.get("/api/acciones", params=parametros)
+            self.assertEqual(respuesta.status_code, 200, respuesta.text)
+            return respuesta.json()["total"]
+
+        self.assertEqual(total(estado=["abierta"]), 2)
+        self.assertEqual(total(estado=["abierta", "completada"]), 3)
+        self.assertEqual(total(persona="ana"), 1)
+        self.assertEqual(total(persona=memoria.SIN_RESPONSABLE), 1)
+        self.assertEqual(total(q="MIGRACION"), 1)
+        self.assertEqual(total(estancadas=True), 1)
+        self.assertEqual(total(estancadas=False), 2)
+        self.assertEqual(total(dias_sin_tocar=1), 3)
+        self.assertEqual(total(hasta="2026-06-30"), 2)
+
+    def test_los_recuentos_no_se_filtran_a_si_mismos(self):
+        self.poblar_acciones()
+        datos = self.cliente.get(
+            "/api/acciones", params={"estado": ["completada"]}
+        ).json()
+        self.assertEqual(datos["total"], 1)
+        self.assertEqual(datos["por_estado"]["abierta"], 2)
+        nombres = {r["persona"] for r in datos["responsables"]}
+        self.assertEqual(nombres, {memoria.SIN_RESPONSABLE})
+
+        datos = self.cliente.get("/api/acciones", params={"persona": "Ana"}).json()
+        self.assertEqual(datos["total"], 1)
+        self.assertEqual(
+            {r["persona"] for r in datos["responsables"]},
+            {"Ana", "Bea", memoria.SIN_RESPONSABLE},
+        )
+
+    def test_paginacion(self):
+        self.poblar_acciones()
+        datos = self.cliente.get(
+            "/api/acciones", params={"limite": 2, "desplazamiento": 2}
+        ).json()
+        self.assertEqual(datos["total"], 3)
+        self.assertEqual(len(datos["acciones"]), 1)
+
+    def test_entrada_invalida_da_422_con_explicacion(self):
+        self.poblar_acciones()
+        casos = [
+            {"estado": ["inventado"]},
+            {"orden": "inventado"},
+            {"desde": "ayer"},
+            {"dias_sin_tocar": 0},
+            {"limite": 0},
+        ]
+        for parametros in casos:
+            with self.subTest(parametros=parametros):
+                respuesta = self.cliente.get("/api/acciones", params=parametros)
+                self.assertEqual(respuesta.status_code, 422, respuesta.text)
+                self.assertIn("detail", respuesta.json())
+
+    def test_un_filtro_sin_resultados_responde_200_y_no_miente(self):
+        self.poblar()  # dos reuniones con una accion abierta cada una
+        datos = self.cliente.get("/api/acciones", params={"persona": "Nadie"}).json()
+        self.assertEqual(datos["total"], 0)
+        self.assertEqual(datos["acciones"], [])
+        # Los recuentos por estado si respetan el resto de filtros: con ese
+        # responsable no hay nada, y decir "2 abiertas" seria mentir sobre lo
+        # que se esta mirando.
+        self.assertEqual(datos["por_estado"]["abierta"], 0)
+        # Pero el desplegable sigue ofreciendo a quien si tiene acciones.
+        self.assertEqual(
+            [r["persona"] for r in datos["responsables"]], ["Javi"]
+        )
+        self.assertEqual(self.cliente.get("/api/acciones").json()["total"], 2)
+
+    def test_el_tablero_no_escribe(self):
+        """La conexion es la de solo lectura, y el filtro de texto registra
+        una funcion SQL: eso no puede convertirla en escribible."""
+        self.poblar_acciones()
+        self.cliente.get("/api/acciones", params={"q": "sesion"})
+        conn = memoria.conectar(self.db, solo_lectura=True)
+        self.addCleanup(conn.close)
+        with self.assertRaises(sqlite3.OperationalError):
+            conn.execute("DELETE FROM actions")
+
 
 class TestFrontEstatico(BaseAPI):
     def test_sirve_la_pagina_y_sus_recursos(self):

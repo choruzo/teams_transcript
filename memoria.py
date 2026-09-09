@@ -26,6 +26,7 @@ import json
 import os
 import re
 import sqlite3
+import unicodedata
 from datetime import date
 from pathlib import Path
 
@@ -176,6 +177,32 @@ def ruta_bd(explicita: Path | str | None = None) -> Path:
     return RUTA_POR_DEFECTO
 
 
+def sin_acentos(texto: str | None) -> str:
+    """`Sesion` y `sesión` deben encontrarse igual.
+
+    Es la version en Python de lo que el tokenizador FTS5 hace con
+    `remove_diacritics 2` sobre los segmentos: se registra como funcion SQL en
+    `conectar` para que el filtro de texto del tablero de acciones (I3) trate
+    los acentos igual que la busqueda de I4. Sin esto, buscar "accion" no
+    encontraria "acción", que es justo lo que se teclea con prisa.
+    """
+    if not texto:
+        return ""
+    descompuesto = unicodedata.normalize("NFD", texto.lower())
+    return "".join(c for c in descompuesto if unicodedata.category(c) != "Mn")
+
+
+def _preparar(conn: sqlite3.Connection) -> sqlite3.Connection:
+    """Lo comun a las dos formas de abrir: `row_factory` y funciones propias.
+
+    `create_function` vale tambien en una conexion `query_only`: define como se
+    interpreta una consulta, no escribe nada.
+    """
+    conn.row_factory = sqlite3.Row
+    conn.create_function("sin_acentos", 1, sin_acentos, deterministic=True)
+    return conn
+
+
 def conectar(
     ruta: Path | str | None = None,
     solo_lectura: bool = False,
@@ -200,8 +227,7 @@ def conectar(
     if solo_lectura:
         if not path.exists():
             raise FileNotFoundError(f"No existe la base de datos: {path}")
-        conn = sqlite3.connect(path, check_same_thread=not entre_hilos)
-        conn.row_factory = sqlite3.Row
+        conn = _preparar(sqlite3.connect(path, check_same_thread=not entre_hilos))
         # Se usa `query_only` y no la URI `mode=ro` a proposito: con la base en
         # modo WAL, una conexion abierta como `mode=ro` no puede crear el
         # fichero `-shm` que SQLite necesita para leer, y falla justo cuando
@@ -212,8 +238,7 @@ def conectar(
         return conn
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=not entre_hilos)
-    conn.row_factory = sqlite3.Row
+    conn = _preparar(sqlite3.connect(path, check_same_thread=not entre_hilos))
     conn.execute("PRAGMA foreign_keys = ON")
     # WAL permite que la API lea mientras el pipeline escribe. Es una propiedad
     # persistente de la base: basta con fijarlo una vez, pero es idempotente.
@@ -909,6 +934,212 @@ def segmentos_de_reunion(
         (meeting_id, limite, desplazamiento),
     ).fetchall()
 
+
+# --------------------------------------------------------------------------
+# Tablero de acciones (fase I3 de la interfaz)
+# --------------------------------------------------------------------------
+
+# La misma proyeccion que `_SQL_ACCIONES_DE_REUNION`, mas el titulo de las dos
+# reuniones y los dias sin tocar. El tablero no se mira desde una reunion, asi
+# que una fecha suelta no dice a que reunion apunta el enlace, y la antiguedad
+# es aqui una columna de primera clase: la pregunta que responde esta vista es
+# "que lleva demasiado tiempo sin moverse".
+_SQL_ACCIONES = """
+SELECT a.id, a.descripcion, a.estado, a.menciones, a.cerrada_en,
+       p.nombre AS persona,
+       mo.uid AS origen_uid, mo.fecha AS origen_fecha, mo.titulo AS origen_titulo,
+       COALESCE(mu.uid, mo.uid) AS ultima_uid,
+       COALESCE(mu.fecha, mo.fecha) AS ultima_fecha,
+       COALESCE(mu.titulo, mo.titulo) AS ultima_titulo,
+       CAST(julianday(?) - julianday(COALESCE(mu.fecha, mo.fecha)) AS INTEGER)
+           AS dias_sin_tocar,
+       (a.menciones >= ? AND a.estado NOT IN ({cerrados})) AS estancada
+{desde_join}
+{where}
+ ORDER BY {orden}
+ LIMIT ? OFFSET ?
+"""
+
+# El FROM va aparte porque los recuentos por estado y por persona lo comparten
+# con la consulta principal: son la misma poblacion contada de otra manera, y
+# duplicarlo seria la forma mas facil de que un dia dejaran de coincidir.
+_DESDE_ACCIONES = """
+  FROM actions a
+  LEFT JOIN personas p ON p.id = a.persona_id
+  JOIN meetings mo ON mo.id = a.meeting_id_origen
+  LEFT JOIN meetings mu ON mu.id = a.meeting_id_ultima
+"""
+
+# El orden por defecto es el del tablero: lo estancado arriba y, dentro de eso,
+# lo mas repetido. Los otros existen porque "que lleva mas tiempo abierto" y
+# "que se movio ayer" son preguntas distintas, y ninguna se puede responder
+# reordenando en el navegador: la lista viene paginada del servidor.
+ORDENES_ACCIONES = {
+    "prioridad": "estancada DESC, a.menciones DESC, ultima_fecha DESC, a.id",
+    "antiguedad": "mo.fecha, a.id",
+    "reciente": "ultima_fecha DESC, a.id DESC",
+    "persona": "persona IS NULL, persona COLLATE NOCASE, estancada DESC, a.id",
+}
+
+# "Sin responsable" no es una persona que se llame asi: `obtener_o_crear_persona`
+# devuelve None para `SPEAKER_01` o "no identificado", y esas acciones se quedan
+# con `persona_id` NULL. Filtrarlas es una de las lecturas utiles del tablero
+# ("esto no lo ha cogido nadie") y necesita un valor propio, porque `persona`
+# vacio ya significa "no filtres por persona".
+SIN_RESPONSABLE = "__sin_responsable__"
+
+
+def _filtros_acciones(
+    *,
+    hoy: str,
+    estados=None,
+    persona: str | None = None,
+    texto: str | None = None,
+    estancadas: bool | None = None,
+    desde: str | None = None,
+    hasta: str | None = None,
+    dias_sin_tocar: int | None = None,
+    omitir: tuple = (),
+) -> tuple[str, list]:
+    """Condiciones del tablero. `omitir` deja fuera un filtro concreto.
+
+    Los recuentos por estado se calculan **sin** el filtro de estado, y los de
+    persona **sin** el de persona: de otro modo el chip ya pulsado se quedaria
+    con su propio numero y los demas a cero, y no habria forma de ver a donde
+    lleva cambiarlo.
+    """
+    condiciones, valores = [], []
+    if estados and "estados" not in omitir:
+        condiciones.append(f"a.estado IN ({_placeholders(estados)})")
+        valores.extend(estados)
+    if persona and "persona" not in omitir:
+        if persona == SIN_RESPONSABLE:
+            condiciones.append("a.persona_id IS NULL")
+        else:
+            condiciones.append("p.nombre = ? COLLATE NOCASE")
+            valores.append(persona)
+    if texto:
+        # LIKE con los acentos ya fuera por los dos lados, igual que hara la
+        # busqueda de I4 sobre los segmentos. Los comodines se escapan: quien
+        # teclea "100 %" busca ese texto, no "lo que sea".
+        patron = sin_acentos(texto).replace("\\", "\\\\")
+        patron = patron.replace("%", "\\%").replace("_", "\\_")
+        condiciones.append("sin_acentos(a.descripcion) LIKE ? ESCAPE '\\'")
+        valores.append(f"%{patron}%")
+    if estancadas is not None:
+        # La misma definicion que la columna `estancada` del SELECT, negada
+        # cuando se piden las que **no** lo estan. Se repite aqui porque un
+        # alias del SELECT no se puede usar en el WHERE de forma portable.
+        if estancadas:
+            condiciones.append(
+                f"(a.menciones >= ? AND a.estado NOT IN "
+                f"({_placeholders(ESTADOS_CERRADOS)}))"
+            )
+        else:
+            condiciones.append(
+                f"(a.menciones < ? OR a.estado IN "
+                f"({_placeholders(ESTADOS_CERRADOS)}))"
+            )
+        valores.append(UMBRAL_ESTANCAMIENTO)
+        valores.extend(ESTADOS_CERRADOS)
+    # Mismo criterio de periodo que los carriles del timeline: entra lo que
+    # **solapa** el rango, no solo lo nacido dentro. Una accion de hace dos
+    # meses que sigue viva es justo la que hay que ver al mirar esta semana.
+    if desde:
+        condiciones.append("COALESCE(mu.fecha, mo.fecha) >= ?")
+        valores.append(desde)
+    if hasta:
+        condiciones.append("mo.fecha <= ?")
+        valores.append(hasta)
+    if dias_sin_tocar:
+        condiciones.append(
+            "julianday(?) - julianday(COALESCE(mu.fecha, mo.fecha)) >= ?"
+        )
+        valores.extend([hoy, dias_sin_tocar])
+    return (" WHERE " + " AND ".join(condiciones) if condiciones else ""), valores
+
+
+def listar_acciones(
+    conn: sqlite3.Connection,
+    *,
+    orden: str = "prioridad",
+    limite: int = 100,
+    desplazamiento: int = 0,
+    **filtros,
+) -> list[sqlite3.Row]:
+    """Las acciones del historico entero, filtradas, ordenadas y paginadas.
+
+    Es la consulta del tablero (seccion 3.4 del plan). A diferencia de
+    `acciones_abiertas`, que le sirve al LLM las de las ultimas N reuniones,
+    esta mira todo el historico y no interpreta nada: filtra, ordena y cuenta.
+    """
+    hoy = _hoy(conn)
+    where, valores = _filtros_acciones(hoy=hoy, **filtros)
+    sql = _SQL_ACCIONES.format(
+        cerrados=_placeholders(ESTADOS_CERRADOS),
+        desde_join=_DESDE_ACCIONES.rstrip("\n"),
+        where=where,
+        orden=ORDENES_ACCIONES.get(orden) or ORDENES_ACCIONES["prioridad"],
+    )
+    return conn.execute(
+        sql,
+        (
+            hoy,
+            UMBRAL_ESTANCAMIENTO,
+            *ESTADOS_CERRADOS,
+            *valores,
+            limite,
+            desplazamiento,
+        ),
+    ).fetchall()
+
+
+def contar_acciones(conn: sqlite3.Connection, **filtros) -> int:
+    """Las que cumplen el filtro, no las que caben en la pagina."""
+    where, valores = _filtros_acciones(hoy=_hoy(conn), **filtros)
+    return conn.execute(
+        f"SELECT count(*) {_DESDE_ACCIONES} {where}", valores
+    ).fetchone()[0]
+
+
+def acciones_por_estado(conn: sqlite3.Connection, **filtros) -> dict[str, int]:
+    """Cuantas hay de cada estado con estos filtros, menos el de estado.
+
+    Devuelve **todos** los estados, incluidos los que no tienen ninguna: un
+    cero explicito es informacion ("no hay nada bloqueado") y un hueco no.
+    """
+    where, valores = _filtros_acciones(hoy=_hoy(conn), omitir=("estados",), **filtros)
+    filas = conn.execute(
+        f"SELECT a.estado, count(*) AS n {_DESDE_ACCIONES} {where} GROUP BY a.estado",
+        valores,
+    ).fetchall()
+    recuento = {estado: 0 for estado in ESTADOS_ACCION}
+    for fila in filas:
+        # Un estado fuera de ESTADOS_ACCION no deberia existir (`normalizar()`
+        # los valida antes de insertar), pero si una base vieja lo tiene, mejor
+        # verlo que perderlo del recuento.
+        recuento[fila["estado"]] = recuento.get(fila["estado"], 0) + fila["n"]
+    return recuento
+
+
+def responsables_de_acciones(conn: sqlite3.Connection, **filtros) -> list[sqlite3.Row]:
+    """Personas con acciones bajo los filtros actuales, menos el de persona.
+
+    Alimenta el desplegable del tablero. No es `/api/personas` (fase I6, con
+    alias y altas): aqui solo hacen falta los nombres que tienen algo que
+    ensenar, y ofrecer a alguien sin ninguna accion solo lleva a una lista
+    vacia.
+    """
+    where, valores = _filtros_acciones(hoy=_hoy(conn), omitir=("persona",), **filtros)
+    return conn.execute(
+        f"""
+        SELECT COALESCE(p.nombre, ?) AS persona, count(*) AS n
+        {_DESDE_ACCIONES} {where}
+         GROUP BY p.nombre
+         ORDER BY n DESC, persona COLLATE NOCASE
+        """,
+        (SIN_RESPONSABLE, *valores),
+    ).fetchall()
 
 def resumen_bd(conn: sqlite3.Connection) -> dict:
     """Cifras generales de la base. Alimenta el endpoint de salud."""
