@@ -581,7 +581,7 @@ pendientes de decidir, y ninguna bloquea el arranque:
 | ~~2~~ | ~~**I1 — Timeline y métricas**~~ **hecha** | 3.1 y 3.2 en SVG, filtros en la URL | Medio | I0 |
 | ~~3~~ | ~~**I2 — Vista de reunión**~~ **hecha** | 3.3 sin audio: resumen, secciones, transcripción | Bajo | I0 |
 | ~~4~~ | ~~**I3 — Tablero de acciones**~~ **hecha** | 3.4 en solo lectura, con badge de estancamiento | Bajo | I0 |
-| 5 | **I4 — Búsqueda** | FTS5 con resaltado, atajo global de teclado | Bajo | I0 |
+| ~~5~~ | ~~**I4 — Búsqueda**~~ **hecha** | FTS5 con resaltado, atajo global de teclado | Bajo | I0 |
 | 6 | **I5 — Chat** | 3.5 con SSE y citas navegables | Medio | **Fase 4 del motor (`ask_teams.py`)** |
 | 7 | **I6 — Corrección humana** | 3.6 completo: tabla `overrides` reaplicada, migración a esquema 2, y sus tests | **Alto** | I2, I3, D0 |
 | 8 | **I7 — Audio sincronizado** | reproductor de 3.3 | Bajo | I2 |
@@ -981,6 +981,82 @@ días sin tocar», que ahora simplemente se calla.
 
 **Pendiente, menor:** el filtro de texto es un `LIKE` sobre la descripción, no
 FTS5 —eso es I4, y va sobre `segments`—, así que no hay stemming ni resaltado.
+(Hecha ya I4: sigue siendo un `LIKE`, porque el índice FTS5 cubre las
+transcripciones y no las descripciones de acción.)
+
+## 9 septies. Resultado de I4 (2026-09-09)
+
+Ficheros nuevos: `web/buscar.html`, `web/js/buscar.js`,
+`web/js/vistas/busqueda.js`, `web/js/buscador.js` (el atajo de teclado, que
+importan las cuatro páginas) y `api/rutas/busqueda.py`. En `memoria.py`, la
+traducción de lo tecleado a sintaxis FTS5 (`consulta_fts`) y las tres
+consultas de la vista (`buscar_segmentos`, `contar_busqueda`,
+`reuniones_de_busqueda`); en `tests/`, 26 pruebas más (122 en total).
+
+Un solo endpoint: `GET /api/buscar`, con `q`, `uid`, `tipo`, `desde`, `hasta`,
+`orden` y paginación.
+
+Decisiones y hallazgos:
+
+1. **Lo que se teclea no es sintaxis de FTS5, y traducirlo es la mitad de la
+   fase.** Un guion, un paréntesis o una comilla suelta hacen que `MATCH`
+   falle con `fts5: syntax error near ...`, y ese error no lo ha cometido
+   quien busca. `consulta_fts` extrae las palabras y **cita cada una**, así
+   que cualquier cosa rara se busca literalmente en vez de romper la consulta
+   o colarse como operador. Se conservan las dos formas que la gente escribe
+   de verdad: `"frase entre comillas"` y `prefijo*`. Hay una prueba con
+   `sesión OR (certificado` y con `NEAR("x" "y")`.
+2. **Una consulta sin nada buscable (`***`, `?!`) es un 422 con explicación**,
+   no una lista vacía. «No aparece en ninguna transcripción» y «no has escrito
+   ninguna palabra» son dos respuestas distintas y solo una de ellas es culpa
+   de los datos.
+3. **Se devuelven segmentos, no reuniones.** La pregunta es «dónde se dijo
+   esto» y la respuesta útil es la frase con su hablante, su minuto y un
+   enlace que abre la transcripción justo ahí (`#s-<idx>`, el ancla que I2
+   dejó puesta y que I5 e I7 van a reutilizar). Una lista de reuniones que hay
+   que abrir una por una no responde a nada.
+4. **El resaltado viaja dentro del texto, con dos caracteres de control.**
+   `snippet()` recorta y marca en una sola pasada; calcular las posiciones por
+   nuestra cuenta obligaría a repetir la tokenización de FTS5 en Python y a
+   equivocarse en cuanto un término lleve acento. El front escapa el HTML
+   **primero** y sustituye los marcadores por `<mark>` **después**: un
+   `<script>` dicho en voz alta sigue siendo texto, y hay una prueba en el
+   navegador que lo comprueba.
+5. **El desglose por reunión es el filtro**, calculado sin el filtro de
+   reunión, exactamente como los chips de estado del tablero: acotar a una
+   reunión no puede borrar la lista desde la que se acota. Con una sola
+   reunión no se pinta: no diría nada que no diga ya cada resultado.
+6. **El atajo vive en un módulo propio y lo cargan las cuatro páginas.** `/`
+   se ignora cuando el foco está en un campo de texto (ahí es una barra) y
+   `Ctrl`/`Cmd`+`K` no, porque un atajo con modificador se pulsa a propósito.
+   En la propia página de búsqueda no navega: enfoca el campo y selecciona lo
+   que hubiera.
+7. **La ayuda de sintaxis está en la página, no en un `title`.** Ocupa el
+   hueco de los resultados antes de buscar nada, y dice lo único que sorprende
+   de FTS5: no hay raíces, así que `reunion` no encuentra «reuniones» y para
+   eso está `reunion*`. Los acentos, en cambio, dan igual en los dos sentidos.
+
+Verificado:
+
+- **122 tests en verde** (69 de `memoria.py` + 53 de la API), con la suite
+  saltándose sola la parte de FastAPI donde no está instalado.
+- **En el navegador** (Chrome, vía el MCP de DevTools), contra una base de
+  demostración de 6 reuniones y 240 segmentos: la consulta con y sin acentos,
+  el prefijo, la frase entrecomillada, los seis chips de reunión y su
+  alternancia, la paginación acumulativa (50 → 60 y el botón que desaparece),
+  el salto al segmento exacto de la transcripción, el 422 de una consulta sin
+  palabras, la búsqueda sin resultados, el atajo desde las otras páginas y su
+  silencio dentro de un campo de texto, tema claro y oscuro, ancho de móvil
+  (420 px) sin desplazamiento horizontal y **sin un solo mensaje en consola**.
+- **Contra la base real**, el criterio de aceptación de la fase: `imputacion`
+  encuentra «imputación», y `planner`, `Coverity`, `eqsim` o `non-regression`
+  —términos del glosario— aparecen con su reunión y su enlace.
+
+**Pendiente, menor:** la búsqueda va sobre `segments` y no sobre los títulos,
+resúmenes ni descripciones de acción; buscar «demo» encuentra dónde se dijo,
+no las acciones que lo llevan en la descripción (para eso está el filtro de
+texto del tablero). Unificar ambas cosas en un solo buscador tendría sentido
+cuando exista el chat de I5, que es quien va a mezclar las dos fuentes.
 
 ---
 

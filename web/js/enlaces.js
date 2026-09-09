@@ -31,3 +31,22 @@ export function urlAcciones(filtros = {}) {
   const consulta = parametros.toString();
   return consulta ? `/acciones.html?${consulta}` : "/acciones.html";
 }
+
+/**
+ * La búsqueda, con su consulta y sus filtros en la dirección (I4).
+ *
+ * Mismo criterio que el tablero: una búsqueda que no se puede pegar en un
+ * chat no sirve para «mira dónde se habló de esto». Comparte la forma de
+ * `urlAcciones` a propósito, y no se unifican en una sola función porque lo
+ * único que tienen en común es el bucle: las claves, la página y el
+ * significado de cada filtro son distintos.
+ */
+export function urlBuscar(filtros = {}) {
+  const parametros = new URLSearchParams();
+  for (const [clave, valor] of Object.entries(filtros)) {
+    if (valor === null || valor === undefined || valor === "") continue;
+    parametros.set(clave, valor);
+  }
+  const consulta = parametros.toString();
+  return consulta ? `/buscar.html?${consulta}` : "/buscar.html";
+}

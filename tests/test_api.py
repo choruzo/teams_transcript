@@ -730,11 +730,130 @@ class TestTablero(BaseAPI):
             conn.execute("DELETE FROM actions")
 
 
+class TestBusqueda(BaseAPI):
+    """El endpoint de busqueda (I4).
+
+    Aqui se prueba el contrato con el front: que lo tecleado llegue traducido a
+    FTS5 sin poder romper nada, que la respuesta traiga con que enlazar al
+    segmento exacto, y que una consulta imposible de interpretar de un 422 con
+    explicacion en vez de una lista vacia -- que se leeria como "no se dijo
+    nunca".
+    """
+
+    def poblar_transcripciones(self):
+        conn = memoria.conectar(self.db)
+        junio = memoria.crear_reunion(
+            conn,
+            fecha="2026-06-01",
+            tipo="daily",
+            titulo="Junio",
+            transcript_path="/d/junio.txt",
+        )
+        julio = memoria.crear_reunion(
+            conn,
+            fecha="2026-07-01",
+            tipo="retro",
+            titulo="Julio",
+            transcript_path="/d/julio.txt",
+        )
+        memoria.insertar_segmentos(
+            conn,
+            junio,
+            [
+                {"texto": "La sesión de refactorización", "inicio": 0.0, "fin": 4.0},
+                {"texto": "El certificado caduca", "inicio": 4.0, "fin": 8.0},
+            ],
+        )
+        memoria.insertar_segmentos(
+            conn, julio, [{"texto": "Retomamos la sesion", "inicio": 0.0, "fin": 3.0}]
+        )
+        conn.commit()
+        conn.close()
+
+    def test_encuentra_sin_distinguir_acentos_y_dice_a_donde_ir(self):
+        self.poblar_transcripciones()
+        datos = self.cliente.get("/api/buscar", params={"q": "sesion"}).json()
+        self.assertEqual(datos["total"], 2)
+        self.assertEqual(datos["consulta_fts"], '"sesion"')
+        self.assertEqual(datos["orden"], "relevancia")
+        # Con esto el front monta el enlace `reunion.html?uid=…#s-<idx>`.
+        for coincidencia in datos["coincidencias"]:
+            self.assertIn(coincidencia["uid"], ("junio", "julio"))
+            self.assertIsInstance(coincidencia["idx"], int)
+
+    def test_el_fragmento_viene_marcado_y_los_marcadores_se_declaran(self):
+        """El front escapa el HTML primero y sustituye los marcadores despues."""
+        self.poblar_transcripciones()
+        datos = self.cliente.get("/api/buscar", params={"q": "certificado"}).json()
+        marcado = datos["marca_inicio"] + "certificado" + datos["marca_fin"]
+        self.assertIn(marcado, datos["coincidencias"][0]["fragmento"])
+
+    def test_el_desglose_por_reunion_ignora_el_filtro_de_reunion(self):
+        self.poblar_transcripciones()
+        datos = self.cliente.get(
+            "/api/buscar", params={"q": "sesion", "uid": "junio"}
+        ).json()
+        self.assertEqual(datos["total"], 1)
+        self.assertEqual(
+            sorted(r["uid"] for r in datos["reuniones"]), ["julio", "junio"]
+        )
+
+    def test_filtros_de_periodo_y_tipo(self):
+        self.poblar_transcripciones()
+        datos = self.cliente.get(
+            "/api/buscar", params={"q": "sesion", "tipo": "retro"}
+        ).json()
+        self.assertEqual(datos["total"], 1)
+        datos = self.cliente.get(
+            "/api/buscar", params={"q": "sesion", "desde": "2026-07-01"}
+        ).json()
+        self.assertEqual(datos["total"], 1)
+
+    def test_pagina_sin_perder_el_total(self):
+        self.poblar_transcripciones()
+        datos = self.cliente.get(
+            "/api/buscar", params={"q": "sesion", "limite": 1}
+        ).json()
+        self.assertEqual(datos["total"], 2)
+        self.assertEqual(len(datos["coincidencias"]), 1)
+
+    def test_una_consulta_sin_palabras_es_un_422_que_lo_explica(self):
+        self.poblar_transcripciones()
+        respuesta = self.cliente.get("/api/buscar", params={"q": "***"})
+        self.assertEqual(respuesta.status_code, 422)
+        self.assertIn("palabra", respuesta.json()["detail"])
+
+    def test_falta_la_consulta(self):
+        self.poblar_transcripciones()
+        self.assertEqual(self.cliente.get("/api/buscar").status_code, 422)
+        self.assertEqual(
+            self.cliente.get("/api/buscar", params={"q": ""}).status_code, 422
+        )
+
+    def test_orden_y_tipo_desconocidos_dan_422(self):
+        self.poblar_transcripciones()
+        for parametros in ({"q": "a", "orden": "raro"}, {"q": "a", "tipo": "asamblea"}):
+            with self.subTest(parametros=parametros):
+                respuesta = self.cliente.get("/api/buscar", params=parametros)
+                self.assertEqual(respuesta.status_code, 422)
+
+    def test_lo_tecleado_no_es_sintaxis_de_fts5(self):
+        """Un parentesis suelto no puede devolver un 500 de `fts5: syntax error`."""
+        self.poblar_transcripciones()
+        for q in ("sesión OR (certificado", 'NEAR("x")', 'comilla"', "guion-medio"):
+            with self.subTest(q=q):
+                self.assertEqual(
+                    self.cliente.get("/api/buscar", params={"q": q}).status_code, 200
+                )
+
+
 class TestFrontEstatico(BaseAPI):
     def test_sirve_la_pagina_y_sus_recursos(self):
         for ruta, tipo in [
             ("/", "text/html"),
             ("/reunion.html", "text/html"),
+            ("/acciones.html", "text/html"),
+            ("/buscar.html", "text/html"),
             ("/js/app.js", "javascript"),
             ("/js/api.js", "javascript"),
             ("/js/svg.js", "javascript"),
@@ -747,6 +866,11 @@ class TestFrontEstatico(BaseAPI):
             ("/js/vistas/reunion.js", "javascript"),
             ("/js/vistas/transcripcion.js", "javascript"),
             ("/js/vistas/salud.js", "javascript"),
+            ("/js/acciones.js", "javascript"),
+            ("/js/vistas/acciones.js", "javascript"),
+            ("/js/buscar.js", "javascript"),
+            ("/js/buscador.js", "javascript"),
+            ("/js/vistas/busqueda.js", "javascript"),
             ("/css/estilo.css", "text/css"),
             ("/css/tokens.css", "text/css"),
         ]:

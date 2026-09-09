@@ -334,3 +334,67 @@ class PaginaDeAcciones(BaseModel):
     por_estado: dict[str, int]
     responsables: list[Responsable]
     acciones: list[AccionTablero]
+
+
+# --------------------------------------------------------------------------
+# I4: busqueda
+# --------------------------------------------------------------------------
+
+
+class Coincidencia(BaseModel):
+    """Un segmento que casa con la busqueda, con su reunion y su resaltado.
+
+    Lleva `uid` e `idx` en vez de una URL montada: las direcciones del front
+    viven en `js/enlaces.js` y la API no tiene por que saber cual es la pagina
+    de una reunion.
+    """
+
+    uid: str
+    fecha: str
+    titulo: str | None = None
+    tipo: str
+    idx: int
+    inicio: float | None = None
+    fin: float | None = None
+    etiqueta: str | None = None
+    persona: str | None = None
+    fragmento: str = Field(
+        description=(
+            "El texto del segmento, recortado si era largo, con los terminos "
+            "encontrados entre los marcadores `marca_inicio`/`marca_fin`"
+        )
+    )
+
+
+class ReunionConCoincidencias(BaseModel):
+    """Cuantas veces aparece el termino en cada reunion.
+
+    Se calcula **sin** el filtro `uid`, igual que `por_estado` en el tablero:
+    acotar a una reunion no puede borrar la lista desde la que se acota.
+    """
+
+    uid: str
+    fecha: str
+    titulo: str | None = None
+    tipo: str
+    n: int
+
+
+class PaginaDeBusqueda(BaseModel):
+    """Resultados, con que contrastarlos y como se interpreto la consulta.
+
+    `consulta_fts` se devuelve a proposito: lo que se teclea no es sintaxis de
+    FTS5 y la API lo reescribe, asi que sin esto nadie podria explicarse por
+    que `refact-` encontro lo que encontro.
+    """
+
+    q: str
+    consulta_fts: str
+    total: int = Field(description="Coincidencias que cumplen el filtro, no las devueltas")
+    limite: int
+    desplazamiento: int
+    orden: str
+    marca_inicio: str
+    marca_fin: str
+    reuniones: list[ReunionConCoincidencias]
+    coincidencias: list[Coincidencia]

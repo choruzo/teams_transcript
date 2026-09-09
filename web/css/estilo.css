@@ -1071,6 +1071,123 @@ footer .bien { color: var(--verde); }
   font-weight: 500;
 }
 
+/* --- Búsqueda (I4) ------------------------------------------------------ */
+
+/* La tecla del atajo, en la cabecera y en la ayuda. Es una pista, no un
+   control: se lee apagada y no se puede pulsar. */
+kbd {
+  font-family: var(--mono);
+  font-size: 0.72em;
+  padding: 0.05em 0.35em;
+  border: 1px solid var(--line);
+  border-radius: var(--radio-s);
+  background: var(--panel2);
+  color: var(--dim);
+}
+
+/* El campo de la consulta manda en la barra de filtros: los demás acotan, este
+   es la pregunta. Crece con el espacio que sobre en vez de quedarse del ancho
+   de un desplegable. */
+.filtros .campo.ancho { flex: 1 1 20rem; }
+.filtros .campo.ancho input { width: 100%; }
+
+/* Las reuniones donde aparece el término, como filtro. Mismo componente que
+   los chips de estado del tablero —y a propósito: hacen lo mismo, acotar la
+   lista sin salir de ella—, pero sin color por tipo: aquí el dato que importa
+   es el recuento, y cuatro colores en veinte chips sería ruido. */
+.reuniones-encontradas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 1rem;
+}
+
+.filtro-reunion {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--dim);
+  font-size: 0.78rem;
+  padding: 0.28rem 0.65rem;
+  border-radius: 999px;
+}
+
+.filtro-reunion b { font-family: var(--mono); font-weight: 600; color: var(--text); }
+.filtro-reunion:hover { border-color: var(--verde2); color: var(--text); }
+
+.filtro-reunion[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--verde2) 22%, var(--panel));
+  border-color: var(--verde2);
+  color: var(--text);
+}
+
+.resultados {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+/* El resultado entero es el enlace, no solo una palabra dentro: se llega aquí
+   para saltar a la transcripción, y un blanco de clic del tamaño de la tarjeta
+   ahorra apuntar. */
+.resultado .ir {
+  display: block;
+  padding: 0.7rem 0.9rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radio);
+  color: inherit;
+  text-decoration: none;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.resultado .ir:hover {
+  border-color: color-mix(in srgb, var(--verde2) 55%, var(--line));
+  background: color-mix(in srgb, var(--verde2) 6%, var(--panel));
+}
+
+.resultado .dicho {
+  margin: 0 0 0.4rem;
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+/* El término encontrado. Fondo tenue y no un amarillo de rotulador: en una
+   lista de cincuenta resultados, medio párrafo resaltado cansa la vista. */
+.resultado mark {
+  background: color-mix(in srgb, var(--verde2) 28%, transparent);
+  color: var(--text);
+  border-radius: 3px;
+  padding: 0 0.12em;
+}
+
+.resultado .meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.76rem;
+  color: var(--dim);
+}
+
+.resultado .meta b { color: var(--text); font-weight: 500; }
+.resultado .meta .quien { color: var(--verde); }
+/* Una etiqueta cruda de la diarización no se disfraza de persona, igual que
+   en la transcripción. */
+.resultado .meta .quien.sin-nombre { color: var(--dim); font-family: var(--mono); }
+.resultado .meta .tiempo { font-family: var(--mono); }
+
+/* La ayuda ocupa el hueco de los resultados antes de buscar nada: es la
+   sintaxis (frases, prefijo) y no un adorno, porque sin prefijo «reunion» no
+   encuentra «reuniones» y eso hay que decirlo antes, no después. */
+.aviso.ayuda { text-align: left; }
+.aviso.ayuda p { margin: 0 0 0.6rem; }
+.aviso.ayuda ul { margin: 0 0 0.6rem; padding-left: 1.1rem; }
+.aviso.ayuda li { margin-bottom: 0.25rem; }
+.aviso.ayuda code { font-family: var(--mono); color: var(--text); }
+.aviso.ayuda .tenue { margin: 0; font-size: 0.8rem; }
+
 @media (max-width: 560px) {
   /* En móvil la columna de tiempos se come un tercio del ancho; el ancla
      sigue existiendo, solo deja de mostrarse. */
@@ -1081,4 +1198,10 @@ footer .bien { color: var(--verde); }
   .filtros .campo { width: 100%; }
   .filtros .campo input,
   .filtros .campo select { width: 100%; }
+}
+
+@media (max-width: 560px) {
+  /* En móvil el campo de la consulta ya ocupa toda la fila por la regla
+     general de .filtros .campo; lo que sobra es el ancho mínimo. */
+  .filtros .campo.ancho { flex-basis: auto; }
 }

@@ -102,7 +102,7 @@ Reglas propias de esta capa:
 ## Vista de reunión (I2)
 
 La segunda página del front (`reunion.html`). No hay enrutado del lado del
-cliente: son ficheros estáticos (tres desde I3) y el navegador ya sabe ir de
+cliente: son ficheros estáticos (cuatro desde I4) y el navegador ya sabe ir de
 uno a otro; un router propio solo tendría sentido si hubiera estado que
 conservar entre vistas. Las direcciones del front viven en `js/enlaces.js`, como las del
 servidor viven en `js/api.js`, y siempre llevan el `uid` —nunca el `id`—
@@ -163,6 +163,33 @@ pasada de `summarize_teams.py` se llevaría la corrección por delante. La nota
 bajo el encabezado lo dice en pantalla, junto con el alcance del dato: el
 estado es el de hoy y el umbral de ESTANCADA es el mismo del `.md`.
 
+## Búsqueda (I4)
+
+La cuarta página (`buscar.html`). Lo propio de esta vista:
+
+1. **El resultado entero es el enlace.** Se llega aquí para saltar a la
+   transcripción, así que el blanco de clic es la tarjeta y no una palabra
+   dentro de ella. Cada uno lleva su reunión, su hablante y su minuto, y
+   apunta al ancla `#s-<idx>` que puso I2.
+2. **El resaltado es un fondo tenue, no un rotulador.** Con cincuenta
+   resultados en pantalla, medio párrafo en amarillo cansa la vista; `mark`
+   usa `--verde2` al 28 %. El HTML se escapa **antes** de sustituir los
+   marcadores que manda la API: el orden inverso pintaría `&lt;mark&gt;` y, lo
+   importante, escaparlo después no protegería de nada.
+3. **Las reuniones donde aparece el término son el filtro**, con el mismo
+   componente que los chips de estado del tablero y por el mismo motivo: se
+   calculan sin el filtro de reunión, así que acotar a una no borra la lista
+   desde la que se acota. Con una sola reunión no se pintan.
+4. **La ayuda de sintaxis ocupa el hueco de los resultados** antes de buscar
+   nada. No es decoración: FTS5 no tiene raíces, `reunion` no encuentra
+   «reuniones», y quien no lo sepa concluirá que la herramienta no funciona.
+
+El atajo global (`/`, o `Ctrl`/`Cmd`+`K`) vive en `js/buscador.js` y lo
+importan las cuatro páginas. `/` se ignora si el foco está en un campo de
+texto —ahí es una barra—; el de modificador no, porque se pulsa a propósito.
+En la propia página de búsqueda enfoca el campo y selecciona lo que hubiera,
+en vez de navegar a donde ya se está.
+
 ## Decir lo que el dato soporta
 
 La interfaz no promete más de lo que hay en la base: los riesgos son
@@ -185,7 +212,7 @@ Un solo botón en la cabecera con tres estados de hecho:
   texto («Claro»/«Oscuro») no dice si nombra el estado actual o el destino.
 
 La lectura de `localStorage` está duplicada a propósito en un `<script>` inline
-del `<head>` de **cada página** (`index.html` y `reunion.html`): `js/tema.js` es un módulo y por tanto diferido, así
+del `<head>` de **cada página** (las cuatro: `index.html`, `reunion.html`, `acciones.html` y `buscar.html`): `js/tema.js` es un módulo y por tanto diferido, así
 que sin ese fragmento la página parpadearía en oscuro antes de pasar a claro.
 Los accesos a `localStorage` van en `try/catch` porque en modo incógnito o con
 las cookies bloqueadas lanzan; en ese caso se sigue al sistema y no se recuerda.

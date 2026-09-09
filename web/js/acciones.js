@@ -17,6 +17,7 @@ import { escapar, plural } from "./formato.js";
 import { dibujarEstados, dibujarTablero } from "./vistas/acciones.js";
 import { pintarSalud } from "./vistas/salud.js";
 import { urlAcciones } from "./enlaces.js";
+import { iniciarAtajoDeBusqueda } from "./buscador.js";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -201,5 +202,6 @@ for (const id of ["persona", "dias_sin_tocar", "orden"]) {
 $("#estancadas").addEventListener("change", () => aplicar(leerFormulario()));
 
 iniciarTema();
+iniciarAtajoDeBusqueda();
 cargar();
 pintarSalud($("#salud"));

@@ -782,5 +782,181 @@ class TestTableroDeAcciones(BaseTemporal):
         )
 
 
+class TestBusqueda(BaseTemporal):
+    """La busqueda de texto completo (I4), sobre `segments_fts`.
+
+    Lo que se prueba es el criterio de aceptacion del plan -- un termino del
+    glosario aparece con acentos o sin ellos y se puede llegar a su reunion --
+    y, sobre todo, que lo que se teclea en una caja de busqueda no puede
+    romper la consulta ni colarse como sintaxis de FTS5.
+    """
+
+    def poblar(self):
+        conn = self.conectar()
+        junio = self.crear(conn, "/d/junio.txt", fecha="2026-06-01", titulo="Junio")
+        julio = self.crear(
+            conn, "/d/julio.txt", fecha="2026-07-01", titulo="Julio", tipo="retro"
+        )
+        ana = memoria.obtener_o_crear_persona(conn, "Ana")
+        memoria.insertar_segmentos(
+            conn,
+            junio,
+            [
+                {
+                    "texto": "La sesión de refactorización quedó a medias",
+                    "inicio": 0.0,
+                    "fin": 4.0,
+                    "etiqueta": "SPEAKER_00",
+                },
+                {
+                    "texto": "El certificado de pre caduca el viernes",
+                    "inicio": 4.0,
+                    "fin": 8.0,
+                },
+            ],
+            {"SPEAKER_00": ana},
+        )
+        memoria.insertar_segmentos(
+            conn,
+            julio,
+            [{"texto": "Retomamos la sesion de refactorizacion", "inicio": 0.0, "fin": 3.0}],
+        )
+        conn.commit()
+        return conn
+
+    def buscar(self, conn, texto, **kwargs):
+        return memoria.buscar_segmentos(conn, memoria.consulta_fts(texto), **kwargs)
+
+    # --- la traduccion de lo tecleado a sintaxis FTS5 ---
+
+    def test_cada_palabra_se_cita(self):
+        self.assertEqual(
+            memoria.consulta_fts("despliegue certificado"), '"despliegue" "certificado"'
+        )
+
+    def test_frase_entre_comillas_y_prefijo(self):
+        self.assertEqual(memoria.consulta_fts('"entorno de pre"'), '"entorno de pre"')
+        self.assertEqual(memoria.consulta_fts("refact*"), '"refact"*')
+
+    def test_sin_nada_buscable_devuelve_none(self):
+        """Distinto de "no hay resultados": no habia nada que buscar."""
+        for texto in ("", None, "   ", "***", "?!-"):
+            with self.subTest(texto=texto):
+                self.assertIsNone(memoria.consulta_fts(texto))
+
+    def test_los_operadores_de_fts5_se_buscan_como_texto(self):
+        """Ni un error de sintaxis ni un operador colado: se busca lo tecleado."""
+        conn = self.poblar()
+        for texto in ("sesión OR (certificado", 'NEAR("x" "y")', 'sesión"', "a-b_c"):
+            with self.subTest(texto=texto):
+                consulta = memoria.consulta_fts(texto)
+                self.assertIsNotNone(consulta)
+                memoria.buscar_segmentos(conn, consulta)  # no lanza
+
+    # --- lo que devuelve ---
+
+    def test_los_acentos_dan_igual_en_los_dos_sentidos(self):
+        conn = self.poblar()
+        for texto in ("sesion", "sesión", "SESIÓN"):
+            with self.subTest(texto=texto):
+                self.assertEqual(len(self.buscar(conn, texto)), 2)
+
+    def test_no_hay_stemming_pero_si_prefijo(self):
+        """Se dice en pantalla porque se nota: `refactor` no encuentra nada."""
+        conn = self.poblar()
+        self.assertEqual(len(self.buscar(conn, "refactor")), 0)
+        self.assertEqual(len(self.buscar(conn, "refactor*")), 2)
+
+    def test_dos_palabras_son_una_y_implicita(self):
+        conn = self.poblar()
+        self.assertEqual(len(self.buscar(conn, "certificado viernes")), 1)
+        self.assertEqual(len(self.buscar(conn, "certificado sesion")), 0)
+
+    def test_devuelve_la_reunion_y_el_ancla_del_segmento(self):
+        conn = self.poblar()
+        fila = self.buscar(conn, "certificado")[0]
+        self.assertEqual(fila["uid"], "junio")
+        self.assertEqual(fila["titulo"], "Junio")
+        self.assertEqual(fila["idx"], 1)
+        self.assertEqual(fila["inicio"], 4.0)
+
+    def test_el_hablante_viaja_con_la_coincidencia(self):
+        conn = self.poblar()
+        fila = self.buscar(conn, "refactorización", uid="junio")[0]
+        self.assertEqual(fila["persona"], "Ana")
+        self.assertEqual(fila["etiqueta"], "SPEAKER_00")
+
+    def test_el_fragmento_marca_el_termino(self):
+        conn = self.poblar()
+        fragmento = self.buscar(conn, "certificado")[0]["fragmento"]
+        self.assertIn(
+            memoria.MARCA_INICIO + "certificado" + memoria.MARCA_FIN, fragmento
+        )
+
+    def test_filtros_de_periodo_tipo_y_reunion(self):
+        conn = self.poblar()
+        self.assertEqual(len(self.buscar(conn, "sesion", desde="2026-07-01")), 1)
+        self.assertEqual(len(self.buscar(conn, "sesion", hasta="2026-06-30")), 1)
+        self.assertEqual(len(self.buscar(conn, "sesion", tipo="retro")), 1)
+        self.assertEqual(len(self.buscar(conn, "sesion", uid="junio")), 1)
+
+    def test_el_desglose_por_reunion_ignora_el_filtro_de_reunion(self):
+        """Acotar a una reunion no puede borrar la lista desde la que se acota."""
+        conn = self.poblar()
+        filas = memoria.reuniones_de_busqueda(
+            conn, memoria.consulta_fts("sesion"), uid="junio"
+        )
+        self.assertEqual([f["uid"] for f in filas], ["julio", "junio"])
+        self.assertEqual([f["n"] for f in filas], [1, 1])
+        # El resto de filtros si se respetan: son lo que se esta mirando.
+        filas = memoria.reuniones_de_busqueda(
+            conn, memoria.consulta_fts("sesion"), tipo="retro"
+        )
+        self.assertEqual([f["uid"] for f in filas], ["julio"])
+
+    def test_contar_no_depende_de_la_pagina(self):
+        conn = self.poblar()
+        consulta = memoria.consulta_fts("sesion")
+        self.assertEqual(memoria.contar_busqueda(conn, consulta), 2)
+        self.assertEqual(len(memoria.buscar_segmentos(conn, consulta, limite=1)), 1)
+        segunda = memoria.buscar_segmentos(conn, consulta, limite=1, desplazamiento=1)
+        self.assertEqual(len(segunda), 1)
+
+    def test_ordenes_por_fecha(self):
+        conn = self.poblar()
+        consulta = memoria.consulta_fts("sesion")
+        recientes = memoria.buscar_segmentos(conn, consulta, orden="reciente")
+        self.assertEqual([f["fecha"] for f in recientes], ["2026-07-01", "2026-06-01"])
+        antiguas = memoria.buscar_segmentos(conn, consulta, orden="antiguo")
+        self.assertEqual([f["fecha"] for f in antiguas], ["2026-06-01", "2026-07-01"])
+
+    def test_un_orden_desconocido_no_llega_al_sql(self):
+        conn = self.poblar()
+        filas = memoria.buscar_segmentos(
+            conn, memoria.consulta_fts("sesion"), orden="s.idx; DROP TABLE meetings"
+        )
+        self.assertEqual(len(filas), 2)
+        self.assertTrue(conn.execute("SELECT count(*) FROM meetings").fetchone()[0])
+
+    def test_se_puede_buscar_en_solo_lectura(self):
+        """La API abre asi: si `MATCH` necesitara escribir, no serviria."""
+        self.poblar().close()
+        conn = self.conectar(solo_lectura=True)
+        self.assertEqual(len(self.buscar(conn, "certificado")), 1)
+
+    def test_reprocesar_no_deja_fantasmas_en_el_indice(self):
+        """La tabla FTS es de contenido externo: la sincronizan tres triggers."""
+        conn = self.poblar()
+        meeting_id = self.crear(
+            conn, "/d/junio.txt", fecha="2026-06-01", titulo="Junio otra vez"
+        )
+        memoria.insertar_segmentos(
+            conn, meeting_id, [{"texto": "Ahora hablamos de otra cosa", "inicio": 0.0}]
+        )
+        conn.commit()
+        self.assertEqual(len(self.buscar(conn, "certificado")), 0)
+        self.assertEqual(len(self.buscar(conn, "cosa")), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

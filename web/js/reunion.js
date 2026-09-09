@@ -15,6 +15,7 @@ import { escapar, plural } from "./formato.js";
 import { dibujarReunion } from "./vistas/reunion.js";
 import { dibujarTranscripcion, irAlSegmento } from "./vistas/transcripcion.js";
 import { pintarSalud } from "./vistas/salud.js";
+import { iniciarAtajoDeBusqueda } from "./buscador.js";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -123,5 +124,6 @@ async function irAlAncla(uid) {
 }
 
 iniciarTema();
+iniciarAtajoDeBusqueda();
 cargar();
 pintarSalud($("#salud"));

@@ -1141,6 +1141,181 @@ def responsables_de_acciones(conn: sqlite3.Connection, **filtros) -> list[sqlite
         (SIN_RESPONSABLE, *valores),
     ).fetchall()
 
+
+# --------------------------------------------------------------------------
+# Busqueda de texto completo (fase I4 de la interfaz)
+# --------------------------------------------------------------------------
+
+# Marcadores del resaltado. Se devuelven **dentro del texto** y no como
+# posiciones porque `snippet()` ya recorta y marca en una sola pasada, y
+# calcular los desplazamientos por nuestra cuenta obligaria a repetir la
+# tokenizacion de FTS5 en Python (y a equivocarse en cuanto un termino lleve
+# acento). Son dos caracteres de control que no aparecen en una transcripcion:
+# quien pinte el resultado escapa el HTML **primero** y los sustituye despues,
+# asi que un `<script>` dicho en voz alta sigue siendo texto.
+MARCA_INICIO = "\x02"
+MARCA_FIN = "\x03"
+
+# Palabras de contexto alrededor de la coincidencia. Un segmento de Whisper son
+# una o dos frases, asi que en la practica casi siempre cabe entero; el recorte
+# solo actua en los segmentos largos de una reunion procesada sin diarizar.
+PALABRAS_DE_CONTEXTO = 32
+
+# Como en el tablero: la clausula no puede viajar como parametro, asi que se
+# interpola desde esta lista blanca y un valor desconocido cae en el primero.
+# "relevancia" es bm25 (mas negativo = mejor coincidencia, de ahi el ASC).
+ORDENES_BUSQUEDA = {
+    "relevancia": "bm25(segments_fts), m.fecha DESC, s.idx",
+    "reciente": "m.fecha DESC, s.idx",
+    "antiguo": "m.fecha, s.idx",
+}
+
+_PALABRAS = re.compile(r"\w+", re.UNICODE)
+_TROZOS = re.compile(r'"([^"]*)"|(\S+)')
+
+
+def consulta_fts(texto: str | None) -> str | None:
+    """Texto tecleado -> expresion MATCH de FTS5, o None si no queda nada.
+
+    Lo que se teclea en una caja de busqueda no es sintaxis de FTS5: un
+    guion, un parentesis o una comilla suelta hacen que `MATCH` lance
+    `fts5: syntax error near ...`, y ese error no lo ha cometido quien busca.
+    Aqui cada palabra se extrae y se **cita**, de modo que cualquier cosa rara
+    se busca literalmente en vez de romper la consulta o, peor, colarse como
+    operador.
+
+    Se conservan dos formas deliberadamente, porque son las unicas que la
+    gente escribe de verdad:
+
+    - `"pantalla de resultados"` entre comillas busca la frase seguida;
+    - `refact*` busca por prefijo.
+
+    Todo lo demas (AND, OR, NEAR, parentesis) se trata como texto: los
+    terminos ya se combinan con Y implicita, que es lo que se espera.
+    """
+    if not texto:
+        return None
+    partes = []
+    for frase, suelto in _TROZOS.findall(texto):
+        crudo = frase if frase else suelto
+        palabras = _PALABRAS.findall(crudo)
+        if not palabras:
+            continue
+        termino = '"' + " ".join(palabras) + '"'
+        # El prefijo solo tiene sentido en una palabra suelta: dentro de una
+        # frase entrecomillada el asterisco es parte de lo que se busca.
+        if not frase and suelto.endswith("*"):
+            termino += "*"
+        partes.append(termino)
+    return " ".join(partes) or None
+
+
+_DESDE_BUSQUEDA = """
+  FROM segments_fts
+  JOIN segments s ON s.id = segments_fts.rowid
+  JOIN meetings m ON m.id = s.meeting_id
+  LEFT JOIN personas p ON p.id = s.persona_id
+"""
+
+
+def _filtros_busqueda(
+    *,
+    desde: str | None = None,
+    hasta: str | None = None,
+    tipo: str | None = None,
+    uid: str | None = None,
+    omitir: tuple = (),
+) -> tuple[str, list]:
+    condiciones, valores = ["segments_fts MATCH ?"], []
+    if desde:
+        condiciones.append("m.fecha >= ?")
+        valores.append(desde)
+    if hasta:
+        condiciones.append("m.fecha <= ?")
+        valores.append(hasta)
+    if tipo:
+        condiciones.append("m.tipo = ?")
+        valores.append(tipo)
+    if uid and "uid" not in omitir:
+        condiciones.append("m.uid = ?")
+        valores.append(uid)
+    return " WHERE " + " AND ".join(condiciones), valores
+
+
+def buscar_segmentos(
+    conn: sqlite3.Connection,
+    consulta: str,
+    *,
+    orden: str = "relevancia",
+    limite: int = 50,
+    desplazamiento: int = 0,
+    **filtros,
+) -> list[sqlite3.Row]:
+    """Los segmentos que casan con `consulta`, con su reunion y su resaltado.
+
+    `consulta` es la expresion que devuelve `consulta_fts`, no lo que tecleo
+    el usuario: quien llame se encarga de convertirla, para poder distinguir
+    "no hay resultados" de "no habia nada buscable".
+
+    Los acentos son indiferentes en los dos sentidos -- buscar "sesion"
+    encuentra "sesión" y al reves -- porque la consulta pasa por el mismo
+    tokenizador `unicode61 remove_diacritics 2` con el que se indexo. Lo que
+    **no** hay es stemming: "reunion" no encuentra "reuniones" (para eso esta
+    el prefijo `reunion*`).
+    """
+    where, valores = _filtros_busqueda(**filtros)
+    sql = f"""
+        SELECT m.uid, m.fecha, m.titulo, m.tipo,
+               s.idx, s.inicio, s.fin, s.etiqueta, p.nombre AS persona,
+               snippet(segments_fts, 0, ?, ?, '…', ?) AS fragmento
+        {_DESDE_BUSQUEDA} {where}
+         ORDER BY {ORDENES_BUSQUEDA.get(orden) or next(iter(ORDENES_BUSQUEDA.values()))}
+         LIMIT ? OFFSET ?
+    """
+    return conn.execute(
+        sql,
+        (
+            MARCA_INICIO,
+            MARCA_FIN,
+            PALABRAS_DE_CONTEXTO,
+            consulta,
+            *valores,
+            limite,
+            desplazamiento,
+        ),
+    ).fetchall()
+
+
+def contar_busqueda(conn: sqlite3.Connection, consulta: str, **filtros) -> int:
+    """Coincidencias totales, no las de la pagina."""
+    where, valores = _filtros_busqueda(**filtros)
+    return conn.execute(
+        f"SELECT count(*) {_DESDE_BUSQUEDA} {where}", (consulta, *valores)
+    ).fetchone()[0]
+
+
+def reuniones_de_busqueda(
+    conn: sqlite3.Connection, consulta: str, limite: int = 50, **filtros
+) -> list[sqlite3.Row]:
+    """En que reuniones aparece el termino y cuantas veces en cada una.
+
+    Es el equivalente de `acciones_por_estado` en el tablero: el recuento que
+    alimenta un filtro se calcula **sin** ese filtro (por eso `omitir=("uid",)`),
+    para que acotar a una reunion no borre la lista desde la que se acota.
+    """
+    where, valores = _filtros_busqueda(omitir=("uid",), **filtros)
+    return conn.execute(
+        f"""
+        SELECT m.uid, m.fecha, m.titulo, m.tipo, count(*) AS n
+        {_DESDE_BUSQUEDA} {where}
+         GROUP BY m.id
+         ORDER BY m.fecha DESC
+         LIMIT ?
+        """,
+        (consulta, *valores, limite),
+    ).fetchall()
+
+
 def resumen_bd(conn: sqlite3.Connection) -> dict:
     """Cifras generales de la base. Alimenta el endpoint de salud."""
     def cuantos(tabla: str) -> int:

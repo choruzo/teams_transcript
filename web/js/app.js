@@ -16,6 +16,7 @@ import { dibujarTimeline } from "./vistas/timeline.js";
 import { dibujarListado } from "./vistas/listado.js";
 import { pintarSalud } from "./vistas/salud.js";
 import { urlReunion } from "./enlaces.js";
+import { iniciarAtajoDeBusqueda } from "./buscador.js";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -177,5 +178,6 @@ window.addEventListener("resize", () => {
 });
 
 iniciarTema();
+iniciarAtajoDeBusqueda();
 cargar();
 pintarSalud($("#salud"));

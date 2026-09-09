@@ -61,4 +61,8 @@ export const api = {
   // El tablero (I3). Devuelve la página **y** los recuentos con los que
   // contrastarla, para que los controles de filtro sepan qué ofrecen.
   acciones: (filtros) => pedir("/acciones", filtros),
+  // La búsqueda (I4). `q` es texto libre: la API lo traduce a sintaxis FTS5 y
+  // devuelve en `consulta_fts` cómo lo entendió, que es lo que permite
+  // explicar un resultado raro sin adivinar.
+  buscar: (filtros) => pedir("/buscar", filtros),
 };
