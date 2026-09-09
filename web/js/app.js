@@ -1,6 +1,7 @@
 // Orquestador de la página. Decide qué se pide, con qué filtros, y reparte a
 // las vistas de js/vistas/. Ninguna vista pide datos por su cuenta ni conoce la
-// URL: así el día que haya enrutado (I2) solo cambia este fichero.
+// URL: la navegación a la vista de reunión (I2) se decide aquí y en ningún
+// otro sitio, con las direcciones de js/enlaces.js.
 //
 // Los filtros viven en la URL (`?desde=&hasta=&tipo=`) para que una vista
 // concreta se pueda guardar en marcadores o pasar por chat. Los "periodos"
@@ -12,7 +13,9 @@ import { iniciarTema } from "./tema.js";
 import { escapar, iso, plural } from "./formato.js";
 import { dibujarMetricas } from "./vistas/metricas.js";
 import { dibujarTimeline } from "./vistas/timeline.js";
-import { dibujarListado, señalar } from "./vistas/listado.js";
+import { dibujarListado } from "./vistas/listado.js";
+import { pintarSalud } from "./vistas/salud.js";
+import { urlReunion } from "./enlaces.js";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -57,6 +60,13 @@ function periodo(dias) {
   return { ...filtrosDeLaUrl(), desde: iso(desde), hasta: iso(hasta) };
 }
 
+// El destino de pulsar una reunión o una acción en el timeline. En I1 era
+// resaltar su tarjeta del listado; desde I2 hay una vista de reunión a la que
+// ir, y este es el único sitio donde se decide.
+const abrirReunion = (uid) => {
+  window.location.href = urlReunion(uid);
+};
+
 function pintarError(donde, mensaje) {
   $(donde).innerHTML = `
     <div class="aviso error">
@@ -84,7 +94,7 @@ function dibujarTodo() {
   if (!ultimo) return;
   // Lo que falló al cargar se queda con su mensaje de error en pantalla: un
   // cambio de tamaño no es motivo para reintentar la petición.
-  if (ultimo.timeline) dibujarTimeline($("#timeline"), ultimo.timeline, señalar);
+  if (ultimo.timeline) dibujarTimeline($("#timeline"), ultimo.timeline, abrirReunion);
   if (ultimo.metricas) dibujarMetricas($("#metricas"), ultimo.metricas);
 }
 
@@ -111,7 +121,7 @@ async function cargar() {
   };
 
   if (timeline.status === "fulfilled") {
-    dibujarTimeline($("#timeline"), timeline.value, señalar);
+    dibujarTimeline($("#timeline"), timeline.value, abrirReunion);
   } else {
     pintarError("#timeline", timeline.reason.message);
   }
@@ -130,32 +140,6 @@ async function cargar() {
   } else {
     pintarError("#listado", pagina.reason.message);
     $("#total").textContent = "";
-  }
-}
-
-async function pintarSalud() {
-  const pie = $("#salud");
-  try {
-    const salud = await api.salud();
-    if (!salud.base_accesible) {
-      pie.innerHTML = `<span class="mal">Base de datos inaccesible:</span> ${escapar(
-        salud.detalle || salud.base_de_datos
-      )}`;
-      return;
-    }
-    const trozos = [
-      `v${escapar(salud.version)}`,
-      `esquema ${salud.esquema}`,
-      plural(salud.reuniones, "reunión", "reuniones"),
-      plural(salud.acciones_abiertas, "acción abierta", "acciones abiertas"),
-    ];
-    if (salud.solo_lectura) trozos.push("solo lectura");
-    pie.textContent = trozos.join(" · ");
-    if (salud.detalle) {
-      pie.innerHTML += ` — <span class="mal">${escapar(salud.detalle)}</span>`;
-    }
-  } catch (error) {
-    pie.innerHTML = `<span class="mal">${escapar(error.message)}</span>`;
   }
 }
 
@@ -194,4 +178,4 @@ window.addEventListener("resize", () => {
 
 iniciarTema();
 cargar();
-pintarSalud();
+pintarSalud($("#salud"));

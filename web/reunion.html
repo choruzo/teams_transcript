@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reunión · Memoria del equipo</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/estilo.css">
+
+  <!-- Mismo fragmento que en index.html, y duplicado por el mismo motivo:
+       js/tema.js es un módulo (diferido) y sin esto la página parpadearía en
+       oscuro antes de pasar a claro. Ver web/ESTILO.md. -->
+  <script>
+    try {
+      var t = localStorage.getItem("tema");
+    } catch (e) {
+      var t = null;
+    }
+    document.documentElement.dataset.tema =
+      t || (matchMedia("(prefers-color-scheme: light)").matches ? "claro" : "oscuro");
+  </script>
+</head>
+<body>
+  <header>
+    <div class="contenedor">
+      <div class="titulo">
+        <h1>Memoria del equipo</h1>
+        <p><a href="/" class="volver">← Volver al histórico</a></p>
+      </div>
+      <button type="button" id="tema" class="tema" aria-label="Cambiar de tema" title="Cambiar de tema">
+        <svg class="sol" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="4.2"/>
+          <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/>
+        </svg>
+        <svg class="luna" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20 14.5A8.2 8.2 0 0 1 9.5 4 8.3 8.3 0 1 0 20 14.5z"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <div id="reunion">
+      <div class="aviso">Cargando…</div>
+    </div>
+
+    <section class="bloque" id="bloque-transcripcion" hidden aria-labelledby="t-transcripcion">
+      <h2 id="t-transcripcion">Transcripción <span id="total-segmentos"></span></h2>
+      <div id="transcripcion"></div>
+    </section>
+  </main>
+
+  <footer>
+    <span id="salud"></span>
+  </footer>
+
+  <script type="module" src="/js/reunion.js"></script>
+</body>
+</html>

@@ -29,6 +29,13 @@ services:
       - ./api:/app/api:ro
       - ./web:/app/web:ro
       - ./memoria.py:/app/memoria.py:ro
+      # La vista de reunion (I2) reutiliza `renderizar_markdown` y los
+      # titulos de `TIPOS` de summarize_teams.py en vez de copiarlos, y ese
+      # modulo importa glosario.py. Sin montarlos, la web funciona pero las
+      # secciones propias de retro/planning desaparecen y la descarga del
+      # .md devuelve 503. Ninguno de los dos anade dependencias: son stdlib.
+      - ./summarize_teams.py:/app/summarize_teams.py:ro
+      - ./glosario.py:/app/glosario.py:ro
       # Datos: en el host, nunca dentro de una imagen (contienen el texto
       # literal de las reuniones). Con escritura porque SQLite en WAL necesita
       # crear los ficheros -wal y -shm aunque solo se lea.

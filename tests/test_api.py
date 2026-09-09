@@ -362,10 +362,230 @@ class TestConexionPorPeticion(BaseAPI):
                 self.assertEqual(self.cliente.get(ruta).status_code, 200)
 
 
+class TestVistaDeReunion(BaseAPI):
+    """Fase I2: la reunion completa y su transcripcion.
+
+    La base se puebla a mano (y no con `poblar`) porque esta vista necesita
+    justo lo que la del listado no miraba: hablantes, intervenciones, riesgos y
+    un arrastre de verdad entre dos reuniones.
+    """
+
+    DATOS_MARTES = {
+        "resumen": "Seguimos",
+        "hablantes": [],
+        "por_persona": [],
+        "acciones": [],
+        "arrastres": [
+            {"action_id": 1, "estado": "en_progreso", "comentario": "falta revisarlo"}
+        ],
+        "riesgos": [],
+        "retro": {"bien": ["el despliegue"], "mal": [], "mejoras": ["mas tests"]},
+    }
+
+    def poblar_detalle(self):
+        conn = memoria.conectar(self.db)
+        lunes = memoria.crear_reunion(
+            conn,
+            fecha="2026-09-07",
+            tipo="daily",
+            titulo="Daily del lunes",
+            resumen="Arrancamos",
+            transcript_path="/datos/lunes.txt",
+            modelo_whisper="medium",
+            modelo_llm="qwen",
+            datos_json={
+                "resumen": "Arrancamos",
+                "hablantes": [],
+                "por_persona": [],
+                "acciones": [],
+                "arrastres": [],
+                "riesgos": [],
+            },
+        )
+        mapa = memoria.registrar_hablantes(
+            conn,
+            lunes,
+            [
+                {"etiqueta": "SPEAKER_00", "nombre": "Javi", "confianza": "alta"},
+                {"etiqueta": "SPEAKER_01", "nombre": "no identificado"},
+            ],
+        )
+        memoria.insertar_segmentos(
+            conn,
+            lunes,
+            [
+                {"texto": "hola", "inicio": 0.0, "fin": 1.5, "etiqueta": "SPEAKER_00"},
+                {"texto": "que tal", "inicio": 1.5, "fin": 3.0, "etiqueta": "SPEAKER_01"},
+                {"texto": "bien", "inicio": 3.0, "fin": 4.25, "etiqueta": "SPEAKER_00"},
+            ],
+            mapa,
+        )
+        memoria.insertar_updates(
+            conn, lunes, [{"persona": "Javi", "trabajo": "la API", "bloqueos": "ninguno"}]
+        )
+        memoria.insertar_riesgos(
+            conn, lunes, [{"descripcion": "el servidor se cae", "severidad": "alta"}]
+        )
+        memoria.insertar_acciones(
+            conn, lunes, [{"descripcion": "Cerrar el informe", "persona": "Javi"}]
+        )
+        accion = conn.execute("SELECT id FROM actions").fetchone()["id"]
+        martes = memoria.crear_reunion(
+            conn,
+            fecha="2026-09-08",
+            tipo="retro",
+            titulo="Retro",
+            transcript_path="/datos/martes.txt",
+            datos_json=dict(self.DATOS_MARTES, arrastres=[
+                {"action_id": accion, "estado": "en_progreso",
+                 "comentario": "falta revisarlo"}
+            ]),
+        )
+        memoria.aplicar_arrastres(
+            conn, martes, [{"action_id": accion, "estado": "en_progreso"}]
+        )
+        conn.commit()
+        conn.close()
+
+    def detalle(self, uid="lunes"):
+        respuesta = self.cliente.get(f"/api/reuniones/{uid}")
+        self.assertEqual(respuesta.status_code, 200)
+        return respuesta.json()
+
+    def test_el_detalle_amplia_la_ficha_del_listado(self):
+        """Es un superconjunto: lo que el listado ya consumia sigue estando."""
+        self.poblar_detalle()
+        datos = self.detalle()
+        for campo in ("uid", "fecha", "tipo", "resumen", "n_segmentos", "n_acciones"):
+            self.assertIn(campo, datos)
+        self.assertEqual(datos["n_segmentos"], 3)
+        self.assertEqual(datos["modelo_whisper"], "medium")
+        self.assertEqual(datos["modelo_llm"], "qwen")
+
+    def test_hablantes_intervenciones_y_riesgos(self):
+        self.poblar_detalle()
+        datos = self.detalle()
+        hablantes = {h["etiqueta"]: h for h in datos["hablantes"]}
+        self.assertEqual(hablantes["SPEAKER_00"]["persona"], "Javi")
+        self.assertIsNone(hablantes["SPEAKER_01"]["persona"])
+        self.assertEqual(datos["intervenciones"][0]["trabajo"], "la API")
+        self.assertEqual(datos["riesgos"][0]["severidad"], "alta")
+
+    def test_la_accion_se_ve_desde_su_reunion_y_desde_la_que_la_arrastro(self):
+        self.poblar_detalle()
+        lunes = self.detalle("lunes")
+        self.assertEqual(len(lunes["acciones"]), 1)
+        self.assertEqual(lunes["arrastres"], [])
+        # El estado es el de hoy, no el del dia de la reunion: lo dice
+        # `ultima_uid`, y de ahi sale el aviso de la interfaz.
+        self.assertEqual(lunes["acciones"][0]["estado"], "en_progreso")
+        self.assertEqual(lunes["acciones"][0]["ultima_uid"], "martes")
+
+        martes = self.detalle("martes")
+        self.assertEqual(martes["acciones"], [])
+        self.assertEqual(len(martes["arrastres"]), 1)
+        self.assertEqual(martes["arrastres"][0]["origen_uid"], "lunes")
+        # El comentario no tiene tabla (D10): se recupera de datos_json.
+        self.assertEqual(martes["arrastres"][0]["comentario"], "falta revisarlo")
+
+    def test_secciones_propias_del_tipo(self):
+        """Lo unico que sale de datos_json y no de una tabla."""
+        self.poblar_detalle()
+        secciones = {s["titulo"]: s["puntos"] for s in self.detalle("martes")["secciones"]}
+        self.assertEqual(secciones["Que fue bien"], ["el despliegue"])
+        self.assertEqual(secciones["Acciones de mejora acordadas"], ["mas tests"])
+        # Las vacias no se envian: la interfaz no pinta secciones en blanco.
+        self.assertNotIn("Que no fue bien", secciones)
+        # Un daily no tiene seccion propia.
+        self.assertEqual(self.detalle("lunes")["secciones"], [])
+
+    def test_segmentos_con_hablante_tiempos_y_paginacion(self):
+        self.poblar_detalle()
+        datos = self.cliente.get("/api/reuniones/lunes/segmentos").json()
+        self.assertEqual(datos["total"], 3)
+        self.assertTrue(datos["con_tiempos"])
+        self.assertEqual([s["texto"] for s in datos["segmentos"]], ["hola", "que tal", "bien"])
+        self.assertEqual(datos["segmentos"][0]["persona"], "Javi")
+        self.assertEqual(datos["segmentos"][1]["etiqueta"], "SPEAKER_01")
+
+        pagina = self.cliente.get(
+            "/api/reuniones/lunes/segmentos?limite=1&desplazamiento=2"
+        ).json()
+        self.assertEqual(pagina["total"], 3, "el total es el de la reunion, no el de la pagina")
+        self.assertEqual([s["idx"] for s in pagina["segmentos"]], [2])
+
+    def test_segmentos_sin_marcas_de_tiempo(self):
+        """D9: sin `.srt` los segmentos entran sin tiempos, y hay que decirlo."""
+        conn = memoria.conectar(self.db)
+        meeting_id = memoria.crear_reunion(
+            conn, fecha="2026-09-07", transcript_path="/datos/sin_srt.txt"
+        )
+        memoria.insertar_segmentos(conn, meeting_id, [{"texto": "sin tiempos"}])
+        conn.commit()
+        conn.close()
+        datos = self.cliente.get("/api/reuniones/sin_srt/segmentos").json()
+        self.assertFalse(datos["con_tiempos"])
+        self.assertIsNone(datos["segmentos"][0]["inicio"])
+        self.assertEqual(self.cliente.get("/api/reuniones/sin_srt/srt").status_code, 409)
+
+    def test_srt_reconstruido_desde_la_base(self):
+        self.poblar_detalle()
+        respuesta = self.cliente.get("/api/reuniones/lunes/srt")
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertIn("lunes.srt", respuesta.headers["content-disposition"])
+        texto = respuesta.text
+        self.assertIn("00:00:00,000 --> 00:00:01,500", texto)
+        self.assertIn("[Javi] hola", texto)
+        # Sin nombre se conserva la etiqueta cruda en vez de dejarlo anonimo.
+        self.assertIn("[SPEAKER_01] que tal", texto)
+
+    def test_markdown_reconstruido_desde_la_base(self):
+        self.poblar_detalle()
+        respuesta = self.cliente.get("/api/reuniones/martes/markdown")
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertIn("markdown", respuesta.headers["content-type"])
+        self.assertIn("martes.md", respuesta.headers["content-disposition"])
+        texto = respuesta.text
+        self.assertIn("# Retro", texto)
+        self.assertIn("## Que fue bien", texto)
+        self.assertIn("falta revisarlo", texto)
+
+    def test_sin_datos_json_no_hay_markdown_que_reconstruir(self):
+        self.poblar()  # las reuniones de `poblar` no llevan datos_json
+        uid = self.cliente.get("/api/reuniones").json()["reuniones"][0]["uid"]
+        self.assertFalse(self.cliente.get(f"/api/reuniones/{uid}").json()["tiene_markdown"])
+        respuesta = self.cliente.get(f"/api/reuniones/{uid}/markdown")
+        self.assertEqual(respuesta.status_code, 404)
+        self.assertIn("datos_json", respuesta.json()["detail"])
+
+    def test_uid_desconocido_da_404_en_todas_las_subrutas(self):
+        self.poblar_detalle()
+        for sufijo in ("", "/segmentos", "/markdown", "/srt"):
+            with self.subTest(sufijo=sufijo):
+                respuesta = self.cliente.get(f"/api/reuniones/inventado{sufijo}")
+                self.assertEqual(respuesta.status_code, 404)
+                self.assertIn("inventado", respuesta.json()["detail"])
+
+    def test_el_detalle_sobrevive_al_reproceso(self):
+        """La URL de la vista de reunion cuelga del uid, que no cambia (D1)."""
+        self.poblar_detalle()
+        conn = memoria.conectar(self.db)
+        memoria.crear_reunion(
+            conn,
+            fecha="2026-09-07",
+            titulo="Daily del lunes (corregida)",
+            transcript_path="/datos/lunes.txt",
+        )
+        conn.commit()
+        conn.close()
+        self.assertEqual(self.detalle("lunes")["titulo"], "Daily del lunes (corregida)")
+
+
 class TestFrontEstatico(BaseAPI):
     def test_sirve_la_pagina_y_sus_recursos(self):
         for ruta, tipo in [
             ("/", "text/html"),
+            ("/reunion.html", "text/html"),
             ("/js/app.js", "javascript"),
             ("/js/api.js", "javascript"),
             ("/js/svg.js", "javascript"),
@@ -373,6 +593,11 @@ class TestFrontEstatico(BaseAPI):
             ("/js/vistas/timeline.js", "javascript"),
             ("/js/vistas/metricas.js", "javascript"),
             ("/js/vistas/listado.js", "javascript"),
+            ("/js/reunion.js", "javascript"),
+            ("/js/enlaces.js", "javascript"),
+            ("/js/vistas/reunion.js", "javascript"),
+            ("/js/vistas/transcripcion.js", "javascript"),
+            ("/js/vistas/salud.js", "javascript"),
             ("/css/estilo.css", "text/css"),
             ("/css/tokens.css", "text/css"),
         ]:

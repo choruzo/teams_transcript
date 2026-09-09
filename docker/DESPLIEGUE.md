@@ -25,7 +25,7 @@ Dos cosas distintas, con ritmos distintos:
 scp dist\teams-transcript-api-0.1.0.tar dist\SHA256SUMS.txt servidor:~/teams_transcript/dist/
 
 # El código: cada vez que se toca el front o la API. Son kilobytes.
-scp -r api web memoria.py docker-compose.yml servidor:~/teams_transcript/
+scp -r api web memoria.py summarize_teams.py glosario.py docker-compose.yml servidor:~/teams_transcript/
 ```
 
 ## 3. En el servidor
@@ -83,6 +83,7 @@ todas las reuniones.
 | Qué cambió | Qué hay que hacer |
 |---|---|
 | `web/`, `api/`, `memoria.py` | `scp` de los ficheros + `docker compose restart api` |
+| `summarize_teams.py`, `glosario.py` | igual: la API los monta porque reutiliza `renderizar_markdown` y los títulos de `TIPOS` |
 | `requirements-api.txt` | `exportar.ps1` con una versión nueva, `scp`, `docker load`, actualizar el tag en `docker-compose.yml`, `docker compose up -d` |
 | `docker-compose.yml` | `scp` + `docker compose up -d` |
 

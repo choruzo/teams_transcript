@@ -1,6 +1,6 @@
 # Estilo de la interfaz
 
-Contrato visual de `web/`. Cualquier vista nueva (I1 en adelante) parte de aquí
+Contrato visual de `web/`. Cualquier vista nueva (I2 en adelante) parte de aquí
 en vez de inventar colores o espaciados.
 
 ## Reglas
@@ -99,6 +99,34 @@ Reglas propias de esta capa:
    barra de filtros, que escriben `desde`/`hasta` en la URL: un estado de vista
    que no se puede enlazar no vale para compartir.
 
+## Vista de reunión (I2)
+
+La segunda página del front (`reunion.html`). No hay enrutado del lado del
+cliente: son dos ficheros estáticos y el navegador ya sabe ir de uno a otro; un
+router propio solo tendría sentido si hubiera estado que conservar entre
+vistas. Las direcciones del front viven en `js/enlaces.js`, como las del
+servidor viven en `js/api.js`, y siempre llevan el `uid` —nunca el `id`—
+porque el `id` cambia al reprocesar.
+
+1. **Ficha arriba, paneles debajo, transcripción al final.** La ficha
+   (`.ficha`) responde a "qué reunión es esto"; los paneles reutilizan
+   `.paneles`/`.panel` de las métricas, así que una vista nueva con bloques
+   hereda el mismo ritmo sin CSS propio.
+2. **Los estados de acción son insignias con la escala de siempre**: verde
+   cerrado, azul en curso, rojo bloqueado, ámbar estancado. Se escriben
+   `.chip.e-<estado>` con doble clase porque `.chip` se define después que las
+   clases de los carriles y, con una sola, ganaría el gris neutro.
+3. **La transcripción se agrupa por hablante consecutivo** y cada segmento
+   conserva su ancla `#s-<idx>`. La marca de tiempo va en monoespaciada y de
+   ancho fijo para que las líneas queden alineadas; en I7 será además el punto
+   por el que salte el audio, y en I5 el destino de las citas del chat. Una
+   etiqueta cruda de la diarización (`SPEAKER_01`) se pinta apagada y en
+   monoespaciada: no se disfraza de persona.
+4. **Lo que se descarga se regenera desde la base**, no se sirve el fichero del
+   disco. El `.md` y el `.srt` originales viven en la máquina que procesó la
+   reunión y, en cuanto I6 permita corregir datos, quedarán obsoletos sin que
+   nadie los regenere.
+
 ## Decir lo que el dato soporta
 
 La interfaz no promete más de lo que hay en la base: los riesgos son
@@ -121,7 +149,7 @@ Un solo botón en la cabecera con tres estados de hecho:
   texto («Claro»/«Oscuro») no dice si nombra el estado actual o el destino.
 
 La lectura de `localStorage` está duplicada a propósito en un `<script>` inline
-del `<head>` de `index.html`: `js/tema.js` es un módulo y por tanto diferido, así
+del `<head>` de **cada página** (`index.html` y `reunion.html`): `js/tema.js` es un módulo y por tanto diferido, así
 que sin ese fragmento la página parpadearía en oscuro antes de pasar a claro.
 Los accesos a `localStorage` van en `try/catch` porque en modo incógnito o con
 las cookies bloqueadas lanzan; en ese caso se sigue al sistema y no se recuerda.

@@ -22,6 +22,20 @@ export function duracion(segundos) {
   return `${horas} h ${String(minutos % 60).padStart(2, "0")} min`;
 }
 
+// Segundos -> "4:07" o "1:04:07". Es la marca de la transcripción, y va en
+// monoespaciada: una columna de tiempos con anchos distintos no se lee.
+export function marcaTiempo(segundos) {
+  if (segundos === null || segundos === undefined) return "";
+  const total = Math.max(0, Math.round(segundos));
+  const dos = (n) => String(n).padStart(2, "0");
+  const horas = Math.floor(total / 3600);
+  const resto = total % 3600;
+  const min = Math.floor(resto / 60);
+  return horas
+    ? `${horas}:${dos(min)}:${dos(resto % 60)}`
+    : `${min}:${dos(resto % 60)}`;
+}
+
 export function minutos(total) {
   if (!total) return "0 min";
   if (total < 60) return `${total} min`;

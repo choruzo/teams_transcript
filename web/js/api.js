@@ -41,7 +41,13 @@ async function pedir(ruta, parametros = {}) {
 export const api = {
   salud: () => pedir("/salud"),
   reuniones: (filtros) => pedir("/reuniones", filtros),
+  // Devuelve la reunion **completa** (secciones, acciones, arrastres): el
+  // mismo endpoint que en I0 daba solo la ficha, ahora con mas campos.
   reunion: (uid) => pedir(`/reuniones/${encodeURIComponent(uid)}`),
+  // La transcripcion va aparte y paginada: una reunion de una hora son
+  // ~350 segmentos y no pueden viajar con la ficha.
+  segmentos: (uid, parametros) =>
+    pedir(`/reuniones/${encodeURIComponent(uid)}/segmentos`, parametros),
   metricas: (filtros) => pedir("/metricas", filtros),
   // El timeline pide reuniones y carriles juntos: se dibujan sobre el mismo
   // eje y en dos peticiones habria un instante con la mitad del dibujo.

@@ -149,3 +149,124 @@ class Timeline(BaseModel):
     truncado: bool = Field(
         description="Si el periodo tenia mas elementos de los devueltos"
     )
+
+
+# --------------------------------------------------------------------------
+# I2: vista de reunion
+# --------------------------------------------------------------------------
+
+
+class Hablante(BaseModel):
+    """Una etiqueta de la diarizacion y la persona a la que se atribuyo.
+
+    `persona` es None cuando nadie le puso nombre: el pipeline no inventa
+    gente para un `SPEAKER_01` suelto, y la interfaz tiene que poder decir
+    "sin identificar" en vez de fingir que lo sabe.
+    """
+
+    etiqueta: str
+    persona: str | None = None
+    confianza: float | None = None
+    metodo: str | None = None
+
+
+class Intervencion(BaseModel):
+    """Lo que conto una persona en la reunion (tabla `updates`)."""
+
+    persona: str
+    trabajo: str | None = None
+    bloqueos: str | None = None
+    proximos_pasos: str | None = None
+
+
+class AccionDeReunion(BaseModel):
+    """Una accion vista desde una reunion concreta.
+
+    `estado` y `menciones` son **los de hoy**, no los del dia de la reunion:
+    la base guarda un solo estado por accion (D10). La interfaz lo advierte
+    cuando la ultima mencion es posterior a la reunion que se esta mirando.
+    """
+
+    id: int
+    descripcion: str
+    persona: str | None = None
+    estado: str
+    menciones: int
+    estancada: bool
+    cerrada_en: str | None = None
+    origen_uid: str
+    origen_fecha: str
+    ultima_uid: str
+    ultima_fecha: str
+    comentario: str | None = Field(
+        None,
+        description=(
+            "Lo que el modelo dijo del arrastre en esta reunion; sale de "
+            "datos_json y puede faltar"
+        ),
+    )
+
+
+class RiesgoDeReunion(BaseModel):
+    descripcion: str
+    area: str | None = None
+    severidad: str | None = None
+
+
+class SeccionExtra(BaseModel):
+    """Las secciones propias del tipo: "Que fue bien", "Alcance comprometido"...
+
+    Son lo unico de la vista que sale de `datos_json` y no de una tabla: el
+    esquema de la base es comun a todos los tipos a proposito.
+    """
+
+    titulo: str
+    puntos: list[str]
+
+
+class ReunionDetalle(Reunion):
+    """Todo lo de una reunion menos la transcripcion, que va aparte y paginada.
+
+    Extiende `Reunion` en vez de sustituirla: `/api/reuniones/{uid}` devuelve
+    un superconjunto de lo que devolvia en I0, asi que nada de lo que ya
+    consumia el front se rompe.
+    """
+
+    transcript_path: str | None = None
+    modelo_whisper: str | None = None
+    modelo_llm: str | None = None
+    creado_en: str | None = None
+    hablantes: list[Hablante] = []
+    intervenciones: list[Intervencion] = []
+    acciones: list[AccionDeReunion] = []
+    arrastres: list[AccionDeReunion] = []
+    riesgos: list[RiesgoDeReunion] = []
+    secciones: list[SeccionExtra] = []
+    tiene_markdown: bool = Field(
+        False, description="Si hay datos_json del que reconstruir el .md"
+    )
+
+
+class Segmento(BaseModel):
+    """Una linea de la transcripcion.
+
+    `inicio`/`fin` van en segundos y pueden ser None: si la reunion se proceso
+    sin `.srt`, los segmentos entraron del `.txt` sin marcas de tiempo (D9).
+    """
+
+    idx: int
+    inicio: float | None = None
+    fin: float | None = None
+    etiqueta: str | None = None
+    persona: str | None = None
+    texto: str
+
+
+class PaginaDeSegmentos(BaseModel):
+    total: int
+    limite: int
+    desplazamiento: int
+    con_tiempos: bool = Field(
+        description="Si los segmentos devueltos traen marcas de tiempo"
+    )
+    segmentos: list[Segmento]

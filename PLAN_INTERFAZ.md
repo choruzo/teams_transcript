@@ -1,7 +1,7 @@
 # Plan de interfaz: de "scripts" a "memoria del equipo consultable"
 
-Redactado el 2026-09-08. **Fases D0, I0 e I1 implementadas** (2026-09-08); el
-resto es propuesta.
+Redactado el 2026-09-08. **Fases D0, I0 e I1 implementadas** (2026-09-08) e
+**I2** (2026-09-09); el resto es propuesta.
 
 Documento complementario de [`PLAN_MEJORAS.md`](PLAN_MEJORAS.md). Aquel define
 el *motor* (glosario, JSON estructurado, SQLite, arrastres, consulta en
@@ -579,7 +579,7 @@ pendientes de decidir, y ninguna bloquea el arranque:
 | ~~0~~ | ~~**D0 — Deuda previa**~~ **hecha** | D1 (uid estable), D2 (remapeo de rutas), D5 (conexión de solo lectura), WAL y los primeros tests | Bajo | Nada |
 | ~~1~~ | ~~**I0 — Esqueleto**~~ **hecha** | FastAPI + Docker + `/api/salud` + `/api/reuniones` + una página que las liste | Bajo | D0 |
 | ~~2~~ | ~~**I1 — Timeline y métricas**~~ **hecha** | 3.1 y 3.2 en SVG, filtros en la URL | Medio | I0 |
-| 3 | **I2 — Vista de reunión** | 3.3 sin audio: resumen, secciones, transcripción | Bajo | I0 |
+| ~~3~~ | ~~**I2 — Vista de reunión**~~ **hecha** | 3.3 sin audio: resumen, secciones, transcripción | Bajo | I0 |
 | 4 | **I3 — Tablero de acciones** | 3.4 en solo lectura, con badge de estancamiento | Bajo | I0 |
 | 5 | **I4 — Búsqueda** | FTS5 con resaltado, atajo global de teclado | Bajo | I0 |
 | 6 | **I5 — Chat** | 3.5 con SSE y citas navegables | Medio | **Fase 4 del motor (`ask_teams.py`)** |
@@ -812,6 +812,98 @@ Verificado en el navegador (lo que quedó pendiente en I0):
 **Pendiente, menor:** el clic de una acción lleva a la reunión de su última
 mención, que es lo mejor disponible hasta I2/I3; y el tope de 200 carriles no
 se ha probado con una base que lo supere.
+
+---
+
+## 9 quinquies. Resultado de I2 (2026-09-09)
+
+Ficheros nuevos: `web/reunion.html`, `web/js/reunion.js`, `web/js/enlaces.js` y
+`web/js/vistas/` (`reunion.js`, `transcripcion.js`, `salud.js`, este último con
+el pie que estaba duplicándose entre las dos páginas). En `memoria.py`, siete
+consultas de lectura (`hablantes_de_reunion`, `updates_de_reunion`,
+`acciones_de_reunion`, `arrastres_de_reunion`, `riesgos_de_reunion`,
+`segmentos_de_reunion`, `contar_segmentos`); en `api/`, el detalle y tres
+endpoints nuevos; en `tests/`, 17 pruebas más (74 en total).
+
+Endpoints: `GET /api/reuniones/{uid}` ampliado a la reunión completa,
+`GET /api/reuniones/{uid}/segmentos` (paginado),
+`GET /api/reuniones/{uid}/markdown` y `GET /api/reuniones/{uid}/srt`.
+
+Decisiones y hallazgos:
+
+1. **La vista se pinta de las tablas, no de `datos_json`.** El plan decía
+   "generado desde `meetings.datos_json`, no releyendo el fichero"; se ha ido un
+   paso más allá porque el JSON es lo que dijo el modelo *aquel día* y las
+   tablas son lo que el histórico da por bueno *hoy*. Si la vista saliera del
+   JSON, una corrección humana (I6) no se vería en la reunión donde se hizo. Del
+   JSON solo salen las dos cosas que no tienen tabla: las secciones propias del
+   tipo y el comentario de cada arrastre.
+2. **Eso obliga a decir en pantalla que el estado es el de hoy.** Una acción
+   nacida el lunes y cerrada el jueves aparece en la reunión del lunes como
+   completada, y el `.md` de aquel día dice otra cosa. La tarjeta enlaza a la
+   reunión de la última mención y el panel lo advierte; esconderlo habría sido
+   la lectura equivocada más fácil de esta vista.
+3. **`/api/reuniones/{uid}` se ha ampliado en vez de añadir `/detalle`.** El
+   modelo nuevo extiende al de I0, así que es un superconjunto y nada de lo que
+   ya consumía el listado se rompe. Un segundo endpoint habría dejado dos
+   contratos para el mismo objeto.
+4. **Las descargas se regeneran desde la base.** El `.md` y el `.srt` de
+   `grabaciones/` viven en la máquina que transcribió, y desde I6 quedarán
+   obsoletos sin que nadie los regenere. El Markdown reutiliza
+   `summarize_teams.renderizar_markdown` para que la descarga y el fichero del
+   pipeline no puedan divergir; el `.srt` se reconstruye de `segments` y
+   devuelve **409 con explicación** si la reunión se procesó sin marcas de
+   tiempo (D9), en vez de un fichero vacío.
+5. **Eso destapó un agujero del despliegue**: `docker-compose.yml` monta
+   `api/`, `web/` y `memoria.py`, pero no `summarize_teams.py`. En el servidor,
+   las secciones de una retro habrían desaparecido **en silencio**. Se montan
+   ahora también `summarize_teams.py` y `glosario.py` (los dos son stdlib), y
+   el import es perezoso y tolerante a fallos: si un día no está, la web sigue
+   en pie y solo se pierde la descarga.
+6. **Sin enrutado del lado del cliente.** Dos páginas estáticas y el navegador
+   yendo de una a otra; un router propio solo tendría sentido si hubiera estado
+   que conservar entre vistas. Las direcciones del front viven en
+   `js/enlaces.js`, igual que las del servidor viven en `js/api.js`.
+7. **Las citas ya tienen a dónde apuntar.** Cada segmento lleva su ancla
+   `#s-<idx>` y la página **carga las páginas que hagan falta** hasta encontrar
+   la citada: sin eso, un enlace a la línea 800 de una reunión larga abriría la
+   página y no iría a ninguna parte. Es lo que consumirán el chat (I5) y el
+   reproductor (I7).
+8. **El clic del timeline ya no resalta una tarjeta, abre la reunión** —el
+   único cambio que I1 dejó previsto—, y con él desaparece `señalar()` del
+   listado. El destello se ha reaprovechado para el segmento al que apunta un
+   ancla.
+
+Verificado:
+
+- **74 tests en verde** (37 de `memoria.py` + 37 de la API), con la suite
+  saltándose sola la parte de FastAPI donde no está instalado.
+- Contra una base de demostración de 14 reuniones, 817 segmentos y 16 acciones
+  con arrastres reales: el detalle, el arrastre visto desde las dos reuniones
+  implicadas, las secciones de retro/planning/workshop, la paginación de
+  segmentos, el `.srt` con hablantes y el `.md` reconstruido.
+- **En el navegador** (Chrome, vía el MCP de DevTools), contra esa misma base:
+  tema claro y oscuro —incluido el conmutador, que persiste en `localStorage`—,
+  ancho de móvil (420 px) sin desplazamiento horizontal, y **sin un solo
+  mensaje en consola**. Se ha comprobado la navegación completa: pulsar una
+  reunión del timeline y pulsar un carril de acción llevan a la vista
+  correcta, y el título de cada tarjeta del listado también.
+- **La paginación y el ancla, con una reunión de 1200 segmentos** creada a
+  propósito: la página carga 500, el botón dice "Cargar 700 segmentos más" y
+  funciona, y abrir `…#s-900` va cargando páginas hasta encontrar el segmento,
+  lo resalta y lo deja justo debajo de la cabecera fija.
+- El render se había comprobado antes **fuera del navegador**, con un DOM
+  mínimo en Node, para verificar el HTML de cada plantilla con campos nulos.
+
+**Un fallo encontrado al mirarlo**: con un `uid` inexistente la página pintaba
+el mismo error **dos veces** —en la ficha y bajo un encabezado "Transcripción"
+de algo que no existe—. Ahora, si la reunión no carga, se muestra un solo aviso
+y el bloque de transcripción ni siquiera aparece.
+
+**Pendiente, menor:** el reproductor de audio de 3.3 queda fuera a propósito
+(es la fase I7), y la transcripción sin marcas de tiempo (D9) solo se ha
+verificado con tests, porque en la base de demostración no hay ninguna
+reunión así.
 
 ---
 

@@ -746,10 +746,10 @@ footer .bien { color: var(--verde); }
 
 .areas b { font-family: var(--mono); font-weight: 600; }
 
-/* Tarjeta señalada desde el timeline. El destello dura lo justo para que la
-   vista sepa dónde ha aterrizado y no deja un estado permanente que luego
-   haya que limpiar. */
-.reunion.señalada { animation: destello 1.4s ease-out; }
+/* Destello del segmento al que apunta un ancla (`#s-12`). Dura lo justo para
+   que la vista sepa dónde ha aterrizado y no deja un estado permanente que
+   luego haya que limpiar. */
+.linea.señalada { animation: destello 1.4s ease-out; }
 
 @keyframes destello {
   from {
@@ -760,5 +760,237 @@ footer .bien { color: var(--verde); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .reunion.señalada { animation: none; border-color: var(--verde); }
+  .linea.señalada { animation: none; background: color-mix(in srgb, var(--verde) 12%, var(--panel)); }
+}
+
+/* El título de la tarjeta es el enlace a la reunión, pero se lee como un
+   título: el azul de enlace en cada tarjeta convertiría el listado en una
+   lista de enlaces y no en una de reuniones. */
+.reunion h2 a { color: inherit; text-decoration: none; }
+.reunion h2 a:hover { color: var(--verde); }
+
+/* --- Vista de reunión (I2) --- */
+
+.volver { color: var(--dim); }
+.volver:hover { color: var(--verde); }
+
+.ficha {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radio);
+  padding: 1rem 1.1rem;
+  margin-bottom: 1.5rem;
+}
+
+.ficha-titulo {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.ficha h2 {
+  margin: 0;
+  font-size: 1.25rem;
+  letter-spacing: -0.01em;
+}
+
+.ficha .uid {
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  margin: 0.3rem 0 0.7rem;
+}
+
+.ficha .chips { margin-bottom: 0; }
+
+/* Un chip apagado dice "este dato no existe", no "vale cero". */
+.chip.apagado { color: color-mix(in srgb, var(--dim) 75%, transparent); }
+
+.descargas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+  margin-top: 0.8rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--line);
+  font-size: 0.82rem;
+}
+
+.resumen-largo {
+  margin: 0;
+  font-size: 0.95rem;
+  line-height: 1.65;
+  max-width: 70ch;
+}
+
+/* Un panel de la vista de reunión puede ser largo (veinte acciones); los de
+   métricas no lo son. Por eso el ritmo vertical se ajusta aquí y no en la
+   regla común de `.panel`. */
+.paneles .panel > ul { margin: 0; padding: 0; list-style: none; }
+.paneles .panel > ul > li + li {
+  margin-top: 0.7rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+
+.vacio {
+  margin: 0;
+  color: var(--dim);
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+.tenue {
+  margin: 0.35rem 0 0;
+  color: var(--dim);
+  font-size: 0.76rem;
+}
+
+.persona { color: var(--verde); font-size: 0.85rem; }
+
+.intervenciones p {
+  margin: 0.25rem 0 0;
+  font-size: 0.86rem;
+  line-height: 1.55;
+}
+
+.intervenciones .bloqueo b { color: var(--ambar); }
+
+.hablantes li { font-size: 0.85rem; }
+.hablantes code { font-family: var(--mono); font-size: 0.9em; color: var(--dim); }
+.hablantes .sin-nombre { color: var(--dim); }
+
+.accion .descripcion {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.accion .meta,
+.riesgos .meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
+}
+
+/* El comentario del arrastre: lo que el modelo dijo de por qué sigue viva.
+   Se marca como cita porque es lo único de la tarjeta que no es un dato de la
+   base, sino texto del LLM. */
+.accion .comentario {
+  margin: 0.4rem 0 0;
+  padding-left: 0.6rem;
+  border-left: 2px solid var(--azul2);
+  color: var(--dim);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+/* Estado de acción como insignia. Repiten la escala de color de los carriles
+   del timeline (verde cerrado, azul en curso, ámbar estancado, rojo
+   bloqueado); van con doble clase porque `.chip` se define después. */
+.chip.e-en_progreso {
+  color: var(--azul);
+  border-color: color-mix(in srgb, var(--azul) 40%, transparent);
+}
+
+.chip.e-bloqueada {
+  color: var(--rojo);
+  border-color: color-mix(in srgb, var(--rojo) 45%, transparent);
+}
+
+.chip.e-completada {
+  color: var(--verde);
+  border-color: color-mix(in srgb, var(--verde) 45%, transparent);
+}
+
+.chip.e-abandonada { color: var(--dim); text-decoration: line-through; }
+
+.riesgos p { margin: 0; font-size: 0.86rem; line-height: 1.5; }
+
+.puntos {
+  font-size: 0.86rem;
+  line-height: 1.55;
+}
+
+.puntos li { list-style: disc; margin-left: 1.1rem; }
+.paneles .panel > ul.puntos > li + li { border-top: none; margin-top: 0.3rem; padding-top: 0; }
+
+/* --- Transcripción (I2) --- */
+
+.transcripcion {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radio);
+  padding: 0.9rem 1rem;
+}
+
+.turno + .turno {
+  margin-top: 0.9rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+
+.turno .quien {
+  display: block;
+  color: var(--verde);
+  font-size: 0.78rem;
+  margin-bottom: 0.25rem;
+}
+
+/* Etiqueta cruda de la diarización (`SPEAKER_01`): nadie le puso nombre, y no
+   se disfraza de persona. */
+.turno .quien.sin-nombre {
+  color: var(--dim);
+  font-family: var(--mono);
+  font-weight: 500;
+}
+
+.lineas { list-style: none; margin: 0; padding: 0; }
+
+.linea {
+  display: flex;
+  gap: 0.6rem;
+  padding: 0.12rem 0.25rem;
+  border-radius: var(--radio-s);
+  scroll-margin-top: 5rem;
+}
+
+.linea:hover { background: var(--panel2); }
+
+/* La marca de tiempo es monoespaciada y de ancho fijo para que las líneas
+   queden alineadas; en I7 será además el punto por el que salta el audio. */
+.linea .tiempo {
+  flex: none;
+  width: 3.6rem;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  padding-top: 0.15rem;
+  text-align: right;
+  text-decoration: none;
+}
+
+.linea .tiempo:hover { color: var(--azul); }
+
+.linea .dicho { font-size: 0.88rem; line-height: 1.55; }
+
+.mas { margin: 0.9rem 0 0; text-align: center; }
+
+.mas button {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--text);
+}
+
+.mas button:hover { border-color: var(--verde2); }
+.mas button[disabled] { color: var(--dim); cursor: default; }
+
+@media (max-width: 560px) {
+  /* En móvil la columna de tiempos se come un tercio del ancho; el ancla
+     sigue existiendo, solo deja de mostrarse. */
+  .linea .tiempo { width: 2.9rem; font-size: 0.68rem; }
+  .ficha-titulo { flex-direction: column; align-items: flex-start; gap: 0.35rem; }
 }

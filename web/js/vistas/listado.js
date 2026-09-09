@@ -1,11 +1,11 @@
 // Listado de reuniones. Nacio en I0 como la vista entera y ahora es la parte
 // de abajo: el timeline responde a "qué ha pasado" y esto a "qué reunión fue".
-// Cada tarjeta lleva su `id` para que el timeline pueda señalarla; cuando
-// exista la vista de reunión (I2), la tarjeta será un enlace.
+// Desde I2 cada tarjeta es un enlace a su vista de reunión; el resalte que
+// hacía el timeline sobre la tarjeta ya no existe, porque pulsar una reunión
+// lleva a verla y no a señalarla en una lista.
 
 import { duracion, escapar } from "../formato.js";
-
-export const idTarjeta = (uid) => `r-${uid}`;
+import { urlReunion } from "../enlaces.js";
 
 function cifra(n, singular, plural_) {
   return `<span><b>${n}</b> ${n === 1 ? singular : plural_}</span>`;
@@ -21,9 +21,11 @@ function tarjeta(reunion) {
   if (reunion.tiene_audio) partes.push("<span>con audio</span>");
 
   return `
-    <article class="reunion" id="${escapar(idTarjeta(reunion.uid))}" tabindex="-1">
+    <article class="reunion">
       <div class="reunion-cabecera">
-        <h2>${escapar(reunion.titulo || reunion.fecha)}</h2>
+        <h2><a href="${urlReunion(reunion.uid)}">${escapar(
+          reunion.titulo || reunion.fecha
+        )}</a></h2>
         <span class="etiqueta" data-tipo="${escapar(reunion.tipo)}">${escapar(reunion.tipo)}</span>
       </div>
       <div class="uid">${escapar(reunion.fecha)} · ${escapar(reunion.uid)}</div>
@@ -44,17 +46,4 @@ export function dibujarListado(contenedor, pagina, hayFiltros) {
     return;
   }
   contenedor.innerHTML = pagina.reuniones.map(tarjeta).join("");
-}
-
-/** Lleva la vista a la tarjeta de esa reunión y la resalta un momento. */
-export function señalar(uid) {
-  const nodo = document.getElementById(idTarjeta(uid));
-  if (!nodo) return;
-  nodo.scrollIntoView({ behavior: "smooth", block: "center" });
-  nodo.classList.remove("señalada");
-  // Reiniciar la animación exige forzar un reflow: sin esto, pulsar dos veces
-  // la misma reunión no vuelve a resaltarla.
-  void nodo.offsetWidth;
-  nodo.classList.add("señalada");
-  nodo.focus({ preventScroll: true });
 }

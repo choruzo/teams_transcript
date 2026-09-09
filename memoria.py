@@ -765,6 +765,151 @@ def contar_reuniones(
     ).fetchone()[0]
 
 
+# --------------------------------------------------------------------------
+# Vista de reunion (fase I2 de la interfaz)
+# --------------------------------------------------------------------------
+
+# Todo lo de aqui se lee de las **tablas**, no de `meetings.datos_json`. El
+# JSON del LLM es lo que dijo el modelo aquella vez; las tablas son lo que el
+# historico da por bueno hoy, y son lo que corregira la fase I6. Si la vista de
+# reunion se pintara del JSON, una correccion humana no se veria en la reunion
+# donde se corrigio. El JSON solo se usa para lo que no tiene tabla: las
+# secciones propias de retro/planning/workshop.
+
+
+def hablantes_de_reunion(conn: sqlite3.Connection, meeting_id: int) -> list[sqlite3.Row]:
+    """Mapeo etiqueta -> persona de esa reunion, con su confianza.
+
+    `persona` puede ser NULL: `obtener_o_crear_persona` no inventa gente para
+    un `SPEAKER_01` sin nombre, y esa etiqueta se queda sin resolver.
+    """
+    return conn.execute(
+        """
+        SELECT ms.etiqueta, ms.confianza, ms.metodo, p.nombre AS persona
+          FROM meeting_speakers ms
+          LEFT JOIN personas p ON p.id = ms.persona_id
+         WHERE ms.meeting_id = ?
+         ORDER BY ms.etiqueta
+        """,
+        (meeting_id,),
+    ).fetchall()
+
+
+def updates_de_reunion(conn: sqlite3.Connection, meeting_id: int) -> list[sqlite3.Row]:
+    """Lo que conto cada persona: la seccion "Por persona" del resumen."""
+    return conn.execute(
+        """
+        SELECT COALESCE(p.nombre, 'no identificado') AS persona,
+               u.trabajo, u.bloqueos, u.proximos_pasos
+          FROM updates u
+          LEFT JOIN personas p ON p.id = u.persona_id
+         WHERE u.meeting_id = ?
+         ORDER BY u.id
+        """,
+        (meeting_id,),
+    ).fetchall()
+
+
+def riesgos_de_reunion(conn: sqlite3.Connection, meeting_id: int) -> list[sqlite3.Row]:
+    """Riesgos **mencionados** en esa reunion. No tienen estado ni continuidad (D3)."""
+    return conn.execute(
+        """
+        SELECT descripcion, area, severidad
+          FROM risks
+         WHERE meeting_id = ?
+         ORDER BY id
+        """,
+        (meeting_id,),
+    ).fetchall()
+
+
+# Las dos consultas de acciones devuelven las mismas columnas a proposito: la
+# interfaz pinta "nacidas aqui" y "arrastradas" con la misma tarjeta, y solo
+# cambia el encabezado.
+_SQL_ACCIONES_DE_REUNION = """
+SELECT a.id, a.descripcion, a.estado, a.menciones, a.cerrada_en,
+       p.nombre AS persona,
+       mo.uid AS origen_uid, mo.fecha AS origen_fecha,
+       COALESCE(mu.uid, mo.uid) AS ultima_uid,
+       COALESCE(mu.fecha, mo.fecha) AS ultima_fecha,
+       (a.menciones >= ? AND a.estado NOT IN ({cerrados})) AS estancada
+  FROM actions a
+  LEFT JOIN personas p ON p.id = a.persona_id
+  JOIN meetings mo ON mo.id = a.meeting_id_origen
+  LEFT JOIN meetings mu ON mu.id = a.meeting_id_ultima
+ WHERE {filtro}
+ ORDER BY estancada DESC, a.menciones DESC, a.id
+"""
+
+
+def acciones_de_reunion(conn: sqlite3.Connection, meeting_id: int) -> list[sqlite3.Row]:
+    """Las acciones que **nacieron** en esa reunion.
+
+    Ojo al leerlas: `estado` y `menciones` son los de **hoy**, no los que
+    tenian al acabar la reunion. Una accion creada en la del lunes y cerrada el
+    jueves aparece aqui como completada, y eso es lo correcto -- pero la
+    interfaz tiene que decirlo, porque el `.md` de aquel dia decia otra cosa.
+    """
+    sql = _SQL_ACCIONES_DE_REUNION.format(
+        cerrados=_placeholders(ESTADOS_CERRADOS), filtro="a.meeting_id_origen = ?"
+    )
+    return conn.execute(
+        sql, (UMBRAL_ESTANCAMIENTO, *ESTADOS_CERRADOS, meeting_id)
+    ).fetchall()
+
+
+def arrastres_de_reunion(conn: sqlite3.Connection, meeting_id: int) -> list[sqlite3.Row]:
+    """Acciones **de reuniones anteriores** cuya ultima mencion es esta.
+
+    Es la cara en la vista de reunion de la Fase 2 del motor. La condicion es
+    `meeting_id_ultima`, asi que una accion que esta reunion menciono pero otra
+    posterior volvio a tocar ya no sale aqui: la base no guarda el historial de
+    menciones, solo la ultima (D10). Mientras se mire la reunion mas reciente
+    -- que es el caso normal -- coincide con lo que dice su `.md`.
+    """
+    sql = _SQL_ACCIONES_DE_REUNION.format(
+        cerrados=_placeholders(ESTADOS_CERRADOS),
+        filtro="a.meeting_id_ultima = ? AND a.meeting_id_origen != ?",
+    )
+    return conn.execute(
+        sql, (UMBRAL_ESTANCAMIENTO, *ESTADOS_CERRADOS, meeting_id, meeting_id)
+    ).fetchall()
+
+
+def contar_segmentos(conn: sqlite3.Connection, meeting_id: int) -> int:
+    return conn.execute(
+        "SELECT count(*) FROM segments WHERE meeting_id = ?", (meeting_id,)
+    ).fetchone()[0]
+
+
+def segmentos_de_reunion(
+    conn: sqlite3.Connection,
+    meeting_id: int,
+    *,
+    limite: int = 500,
+    desplazamiento: int = 0,
+) -> list[sqlite3.Row]:
+    """La transcripcion, en orden y por paginas.
+
+    Se pagina siempre: una hora de reunion son ~350 segmentos y una de tres,
+    mil largos. `inicio`/`fin` pueden ser NULL si la reunion se proceso sin
+    `.srt` (D9); el `persona_id` viene del mapeo de hablantes, y la `etiqueta`
+    cruda se conserva para poder mostrar `SPEAKER_01` cuando nadie le puso
+    nombre.
+    """
+    return conn.execute(
+        """
+        SELECT s.idx, s.inicio, s.fin, s.etiqueta, p.nombre AS persona, s.texto
+          FROM segments s
+          LEFT JOIN personas p ON p.id = s.persona_id
+         WHERE s.meeting_id = ?
+         ORDER BY s.idx
+         LIMIT ? OFFSET ?
+        """,
+        (meeting_id, limite, desplazamiento),
+    ).fetchall()
+
+
 def resumen_bd(conn: sqlite3.Connection) -> dict:
     """Cifras generales de la base. Alimenta el endpoint de salud."""
     def cuantos(tabla: str) -> int:

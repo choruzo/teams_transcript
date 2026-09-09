@@ -427,6 +427,127 @@ class TestCarriles(BaseTemporal):
         self.assertEqual(memoria.carriles_acciones(conn, solo_abiertas=True), [])
 
 
+class TestVistaDeReunion(BaseTemporal):
+    """Las consultas que alimentan la vista de reunion (I2).
+
+    Se comprueban contra las tablas y no contra `datos_json` a proposito: es la
+    decision de la fase, y la que hara que una correccion humana (I6) se vea en
+    la reunion donde se corrigio.
+    """
+
+    def poblar(self):
+        conn = self.conectar()
+        self.lunes = self.crear(conn, "/d/lunes.txt", fecha="2026-09-07")
+        mapa = memoria.registrar_hablantes(
+            conn,
+            self.lunes,
+            [
+                {"etiqueta": "SPEAKER_00", "nombre": "Javi", "confianza": "alta"},
+                # Nombre generico: no crea persona, y la etiqueta queda sin
+                # resolver en vez de inventarse a alguien.
+                {"etiqueta": "SPEAKER_01", "nombre": "no identificado"},
+            ],
+        )
+        memoria.insertar_segmentos(
+            conn,
+            self.lunes,
+            [
+                {"texto": "uno", "inicio": 0.0, "fin": 1.0, "etiqueta": "SPEAKER_00"},
+                {"texto": "dos", "inicio": 1.0, "fin": 2.0, "etiqueta": "SPEAKER_01"},
+                {"texto": "tres", "inicio": 2.0, "fin": 3.0, "etiqueta": "SPEAKER_00"},
+            ],
+            mapa,
+        )
+        memoria.insertar_updates(
+            conn, self.lunes, [{"persona": "Javi", "trabajo": "la API"}]
+        )
+        memoria.insertar_riesgos(
+            conn, self.lunes, [{"descripcion": "se cae", "severidad": "alta"}]
+        )
+        memoria.insertar_acciones(
+            conn, self.lunes, [{"descripcion": "Cerrar el informe", "persona": "Javi"}]
+        )
+        self.martes = self.crear(conn, "/d/martes.txt", fecha="2026-09-08")
+        conn.commit()
+        return conn
+
+    def test_lo_de_cada_reunion_es_suyo(self):
+        conn = self.poblar()
+        self.assertEqual(len(memoria.updates_de_reunion(conn, self.lunes)), 1)
+        self.assertEqual(len(memoria.riesgos_de_reunion(conn, self.lunes)), 1)
+        self.assertEqual(len(memoria.acciones_de_reunion(conn, self.lunes)), 1)
+        for consulta in (
+            memoria.updates_de_reunion,
+            memoria.riesgos_de_reunion,
+            memoria.acciones_de_reunion,
+            memoria.hablantes_de_reunion,
+        ):
+            with self.subTest(consulta=consulta.__name__):
+                self.assertEqual(consulta(conn, self.martes), [])
+
+    def test_hablante_sin_nombre_se_queda_sin_persona(self):
+        conn = self.poblar()
+        filas = {f["etiqueta"]: f for f in memoria.hablantes_de_reunion(conn, self.lunes)}
+        self.assertEqual(filas["SPEAKER_00"]["persona"], "Javi")
+        self.assertIsNone(filas["SPEAKER_01"]["persona"])
+
+    def test_el_arrastre_sale_en_la_reunion_que_lo_menciono_y_no_en_la_suya(self):
+        conn = self.poblar()
+        accion = memoria.acciones_de_reunion(conn, self.lunes)[0]
+        memoria.aplicar_arrastres(
+            conn, self.martes, [{"action_id": accion["id"], "estado": "en_progreso"}]
+        )
+        conn.commit()
+
+        # Nace el lunes: sigue siendo suya, aunque ahora la ultima mencion sea
+        # el martes. Y el martes la ve como arrastre, no como propia.
+        propia = memoria.acciones_de_reunion(conn, self.lunes)[0]
+        self.assertEqual(propia["ultima_uid"], "martes")
+        self.assertEqual(propia["estado"], "en_progreso")
+        self.assertEqual(memoria.acciones_de_reunion(conn, self.martes), [])
+
+        arrastres = memoria.arrastres_de_reunion(conn, self.martes)
+        self.assertEqual([a["descripcion"] for a in arrastres], ["Cerrar el informe"])
+        self.assertEqual(arrastres[0]["origen_uid"], "lunes")
+        # La reunion donde nacio no se lista a si misma como arrastre.
+        self.assertEqual(memoria.arrastres_de_reunion(conn, self.lunes), [])
+
+    def test_estancada_con_el_mismo_umbral_que_el_markdown(self):
+        conn = self.poblar()
+        accion = memoria.acciones_de_reunion(conn, self.lunes)[0]
+        self.assertFalse(accion["estancada"])
+        conn.execute(
+            "UPDATE actions SET menciones = ? WHERE id = ?",
+            (memoria.UMBRAL_ESTANCAMIENTO, accion["id"]),
+        )
+        conn.commit()
+        self.assertTrue(memoria.acciones_de_reunion(conn, self.lunes)[0]["estancada"])
+
+    def test_una_accion_cerrada_no_esta_estancada(self):
+        conn = self.poblar()
+        conn.execute(
+            "UPDATE actions SET menciones = ?, estado = 'completada'",
+            (memoria.UMBRAL_ESTANCAMIENTO + 5,),
+        )
+        conn.commit()
+        self.assertFalse(memoria.acciones_de_reunion(conn, self.lunes)[0]["estancada"])
+
+    def test_segmentos_en_orden_y_paginados(self):
+        conn = self.poblar()
+        self.assertEqual(memoria.contar_segmentos(conn, self.lunes), 3)
+        todos = memoria.segmentos_de_reunion(conn, self.lunes)
+        self.assertEqual([s["texto"] for s in todos], ["uno", "dos", "tres"])
+        # El hablante llega resuelto o crudo, segun se pudiera identificar.
+        self.assertEqual(todos[0]["persona"], "Javi")
+        self.assertIsNone(todos[1]["persona"])
+        self.assertEqual(todos[1]["etiqueta"], "SPEAKER_01")
+
+        pagina = memoria.segmentos_de_reunion(
+            conn, self.lunes, limite=2, desplazamiento=2
+        )
+        self.assertEqual([s["idx"] for s in pagina], [2])
+
+
 class TestConexionEntreHilos(BaseTemporal):
     """La API abre en un hilo del pool y puede cerrar en otro."""
 
