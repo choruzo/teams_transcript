@@ -848,6 +848,83 @@ def riesgos_de_reunion(conn: sqlite3.Connection, meeting_id: int) -> list[sqlite
     ).fetchall()
 
 
+# --------------------------------------------------------------------------
+# Consultas transversales (Fase 4: `ask_teams.py`)
+# --------------------------------------------------------------------------
+# Las dos anteriores responden "que paso en esta reunion". Estas dos responden
+# "que se ha contado ultimamente", que es lo que necesita una pregunta en
+# lenguaje natural, y viven aqui por la misma regla de siempre: ni la API ni
+# `ask_teams.py` escriben SQL.
+
+
+def updates_recientes(
+    conn: sqlite3.Connection,
+    *,
+    persona: str | None = None,
+    desde: str | None = None,
+    hasta: str | None = None,
+    limite: int = 40,
+) -> list[sqlite3.Row]:
+    """Lo que ha contado la gente, con su reunion, mas reciente primero."""
+    where = ["1=1"]
+    valores: list = []
+    if persona:
+        where.append("sin_acentos(p.nombre) LIKE '%' || sin_acentos(?) || '%'")
+        valores.append(persona)
+    if desde:
+        where.append("m.fecha >= ?")
+        valores.append(desde)
+    if hasta:
+        where.append("m.fecha <= ?")
+        valores.append(hasta)
+    valores.append(limite)
+    return conn.execute(
+        f"""
+        SELECT COALESCE(p.nombre, 'no identificado') AS persona,
+               u.trabajo, u.bloqueos, u.proximos_pasos,
+               m.uid, m.fecha, m.titulo, m.tipo
+          FROM updates u
+          LEFT JOIN personas p ON p.id = u.persona_id
+          JOIN meetings m ON m.id = u.meeting_id
+         WHERE {" AND ".join(where)}
+         ORDER BY m.fecha DESC, u.id
+         LIMIT ?
+        """,
+        valores,
+    ).fetchall()
+
+
+def riesgos_recientes(
+    conn: sqlite3.Connection,
+    *,
+    desde: str | None = None,
+    hasta: str | None = None,
+    limite: int = 40,
+) -> list[sqlite3.Row]:
+    """Riesgos **mencionados** en el periodo, con su reunion (D3: sin estado)."""
+    where = ["1=1"]
+    valores: list = []
+    if desde:
+        where.append("m.fecha >= ?")
+        valores.append(desde)
+    if hasta:
+        where.append("m.fecha <= ?")
+        valores.append(hasta)
+    valores.append(limite)
+    return conn.execute(
+        f"""
+        SELECT r.descripcion, r.area, r.severidad,
+               m.uid, m.fecha, m.titulo, m.tipo
+          FROM risks r
+          JOIN meetings m ON m.id = r.meeting_id
+         WHERE {" AND ".join(where)}
+         ORDER BY m.fecha DESC, r.id
+         LIMIT ?
+        """,
+        valores,
+    ).fetchall()
+
+
 # Las dos consultas de acciones devuelven las mismas columnas a proposito: la
 # interfaz pinta "nacidas aqui" y "arrastradas" con la misma tarjeta, y solo
 # cambia el encabezado.
