@@ -35,13 +35,13 @@ import json
 import os
 import re
 import sys
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 import glosario as glosario_mod
+import llm
 import memoria
+import rag
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -286,28 +286,14 @@ def call_litellm(
     messages: list[dict],
     temperature: float = 0.3,
 ) -> str:
-    payload = {"model": model, "messages": messages, "temperature": temperature}
-    request = urllib.request.Request(
-        url=f"{base_url.rstrip('/')}/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=600) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"LiteLLM devolvio HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(
-            f"No se pudo conectar con LiteLLM en '{base_url}': {exc.reason}"
-        ) from exc
+    """Envoltorio de `llm.chat`, que es donde vive ahora el cliente HTTP.
 
-    return body["choices"][0]["message"]["content"]
+    Se conserva el nombre y la firma porque este modulo es lo que se ejecuta a
+    mano en el servidor: mover la implementacion no deberia cambiar nada de lo
+    que ya funciona. `llm.ErrorLLM` hereda de RuntimeError, asi que quien
+    capturaba RuntimeError sigue capturandolo.
+    """
+    return llm.chat(base_url, api_key, model, messages, temperature)
 
 
 _BLOQUE_CODIGO = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
@@ -818,6 +804,54 @@ def guardar_en_bd(
 # --------------------------------------------------------------------------
 
 
+def indexar_reunion_en_segundo_plano(args, transcript_path: Path) -> None:
+    """Pone al dia el indice semantico de esta reunion.
+
+    Es un extra: si falla -- no esta `sqlite-vec`, el modelo de embeddings no
+    responde, el indice se construyo con otro modelo --, se avisa por stderr y
+    ya esta. El resumen y la base de datos, que es lo que importa, ya estan
+    guardados; y `python indexar_teams.py` lo arregla luego.
+    """
+    if not rag.hay_extension():
+        return
+    try:
+        conn_hist = memoria.conectar(memoria.ruta_bd(args.db), solo_lectura=True)
+        conn_idx = rag.conectar(args.indice)
+        try:
+            meeting_id = memoria.id_reunion_por_transcripcion(
+                conn_hist, str(transcript_path)
+            )
+            fila = conn_hist.execute(
+                "SELECT * FROM meetings WHERE id = ?", (meeting_id,)
+            ).fetchone()
+            modelo = llm.modelo_embeddings(args.modelo_embeddings)
+            resultado = rag.indexar_reunion(
+                conn_idx,
+                conn_hist,
+                fila,
+                embebedor=rag.embebedor_litellm(
+                    llm.base_url_embeddings(args.base_url_embeddings),
+                    llm.api_key(args.api_key),
+                    modelo,
+                    llm.prefijo_embeddings(),
+                ),
+                modelo=modelo,
+            )
+        finally:
+            conn_hist.close()
+            conn_idx.close()
+    except Exception as exc:  # noqa: BLE001 - el indice es accesorio
+        print(
+            f"Aviso: no se pudo actualizar el indice semantico: {exc}",
+            file=sys.stderr,
+        )
+        return
+    print(
+        f"Indice semantico: {resultado['accion']} "
+        f"({resultado.get('chunks', 0)} fragmentos)"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Resume una transcripcion de reunion usando un LLM local via LiteLLM."
@@ -868,6 +902,26 @@ def main() -> None:
         default=None,
         help="Ruta de la base de datos del historico (por defecto: la variable "
         f"de entorno {memoria.VARIABLE_ENTORNO}, o datos/meetings.db)",
+    )
+    parser.add_argument(
+        "--indice",
+        default=None,
+        help="Ruta del indice semantico (por defecto, la variable TEAMS_INDICE)",
+    )
+    parser.add_argument(
+        "--sin-indice",
+        action="store_true",
+        help="No actualizar el indice semantico al terminar",
+    )
+    parser.add_argument(
+        "--modelo-embeddings",
+        default=None,
+        help="Modelo de embeddings del indice (o TEAMS_EMBED_MODELO)",
+    )
+    parser.add_argument(
+        "--base-url-embeddings",
+        default=None,
+        help="URL del modelo de embeddings (o TEAMS_EMBED_BASE_URL)",
     )
     parser.add_argument(
         "--sin-bd",
@@ -1032,6 +1086,8 @@ def main() -> None:
                 f"{recuentos['acciones']} acciones, {recuentos['riesgos']} riesgos, "
                 f"{recuentos['arrastres']} arrastres)"
             )
+            if not args.sin_indice:
+                indexar_reunion_en_segundo_plano(args, transcript_path)
 
     print("\n--- Resumen ---\n")
     print(markdown)

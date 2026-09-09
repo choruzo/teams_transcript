@@ -5,3 +5,7 @@ openai-whisper>=20231117
 # Opcional, solo si usas transcribe_teams.py --diarize (identificacion de
 # hablantes). Requiere token de HuggingFace, ver README.md.
 # pyannote.audio>=3.1
+
+# Opcional, solo para el indice semantico del chat (indexar_teams.py /
+# ask_teams.py). Sin el, la busqueda del chat es solo literal (FTS5).
+# sqlite-vec>=0.1.9
