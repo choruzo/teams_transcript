@@ -7,7 +7,7 @@
 
 services:
   api:
-    image: teams-transcript-api:0.1.0   # tag fijo y versionado, nunca :latest
+    image: teams-transcript-api:0.2.0   # tag fijo y versionado, nunca :latest
     pull_policy: never                  # no intentes ir a ningun registro
     container_name: teams-api
     restart: unless-stopped
@@ -24,6 +24,20 @@ services:
       TEAMS_RAIZ_ORIGEN: ${TEAMS_RAIZ_ORIGEN:-}
       TEAMS_RAIZ_LOCAL: /app
 
+      # El chat (I5). LiteLLM corre en el host, fuera del compose: dentro del
+      # contenedor "localhost" es el propio contenedor, de ahi el
+      # host.docker.internal de mas abajo.
+      LITELLM_BASE_URL: ${LITELLM_BASE_URL:-http://host.docker.internal:4000/v1}
+      # Los embeddings pueden estar en otro puerto: con un proxy LiteLLM
+      # delante no hace falta, con dos `llama-server` sueltos si.
+      TEAMS_EMBED_BASE_URL: ${TEAMS_EMBED_BASE_URL:-}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:-}
+      TEAMS_LLM_MODELO: ${TEAMS_LLM_MODELO:-}
+      TEAMS_EMBED_MODELO: ${TEAMS_EMBED_MODELO:-}
+      # Indice semantico. Si el fichero no existe, el chat responde igual con
+      # busqueda literal y lo dice en pantalla.
+      TEAMS_INDICE: /app/datos/indice.db
+
     volumes:
       # Codigo: se monta, no se hornea. Actualizar = scp + docker compose restart.
       - ./api:/app/api:ro
@@ -36,6 +50,13 @@ services:
       # .md devuelve 503. Ninguno de los dos anade dependencias: son stdlib.
       - ./summarize_teams.py:/app/summarize_teams.py:ro
       - ./glosario.py:/app/glosario.py:ro
+      # El chat (I5) importa ask_teams.py, que a su vez importa rag.py y
+      # llm.py. Sin montarlos, /api/chat devuelve un 503 explicativo y la
+      # pagina del chat queda inutil; las otras cuatro siguen funcionando.
+      # Los tres son stdlib salvo `sqlite-vec`, que va en la imagen.
+      - ./ask_teams.py:/app/ask_teams.py:ro
+      - ./rag.py:/app/rag.py:ro
+      - ./llm.py:/app/llm.py:ro
       # Datos: en el host, nunca dentro de una imagen (contienen el texto
       # literal de las reuniones). Con escritura porque SQLite en WAL necesita
       # crear los ficheros -wal y -shm aunque solo se lea.
@@ -46,6 +67,11 @@ services:
     # autenticacion primero (PLAN_INTERFAZ.md, seccion 6).
     ports:
       - "127.0.0.1:8080:8000"
+
+    # En Linux este alias no existe por defecto; es como el contenedor llega a
+    # LiteLLM, que corre en el host junto a la GPU.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/salud').read()"]

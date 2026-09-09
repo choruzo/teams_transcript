@@ -1,7 +1,7 @@
 # Plan de interfaz: de "scripts" a "memoria del equipo consultable"
 
 Redactado el 2026-09-08. **Fases D0, I0 e I1 implementadas** (2026-09-08) e
-**I2 e I3** (2026-09-09); el resto es propuesta.
+**I2, I3, I4 e I5** (2026-09-09); el resto es propuesta.
 
 Documento complementario de [`PLAN_MEJORAS.md`](PLAN_MEJORAS.md). Aquel define
 el *motor* (glosario, JSON estructurado, SQLite, arrastres, consulta en
@@ -582,7 +582,7 @@ pendientes de decidir, y ninguna bloquea el arranque:
 | ~~3~~ | ~~**I2 — Vista de reunión**~~ **hecha** | 3.3 sin audio: resumen, secciones, transcripción | Bajo | I0 |
 | ~~4~~ | ~~**I3 — Tablero de acciones**~~ **hecha** | 3.4 en solo lectura, con badge de estancamiento | Bajo | I0 |
 | ~~5~~ | ~~**I4 — Búsqueda**~~ **hecha** | FTS5 con resaltado, atajo global de teclado | Bajo | I0 |
-| 6 | **I5 — Chat** | 3.5 con SSE y citas navegables | Medio | **Fase 4 del motor (`ask_teams.py`)** |
+| ~~6~~ | ~~**I5 — Chat**~~ **hecha** | 3.5 con SSE y citas navegables | Medio | **Fase 4 del motor (`ask_teams.py`)** |
 | 7 | **I6 — Corrección humana** | 3.6 completo: tabla `overrides` reaplicada, migración a esquema 2, y sus tests | **Alto** | I2, I3, D0 |
 | 8 | **I7 — Audio sincronizado** | reproductor de 3.3 | Bajo | I2 |
 | 9 | **I8 — Informes** | 3.2 ampliado + descarga de Markdown | Bajo | **Fase 5 del motor** |
@@ -1057,6 +1057,100 @@ resúmenes ni descripciones de acción; buscar «demo» encuentra dónde se dijo
 no las acciones que lo llevan en la descripción (para eso está el filtro de
 texto del tablero). Unificar ambas cosas en un solo buscador tendría sentido
 cuando exista el chat de I5, que es quien va a mezclar las dos fuentes.
+
+---
+
+## 9 octies. Resultado de I5 (2026-09-09)
+
+Ficheros nuevos: `web/chat.html`, `web/js/chat.js`, `web/js/vistas/chat.js` y
+`api/rutas/chat.py`. En el motor —y por eso esta fase llegó con la Fase 4 del
+otro plan hecha— `llm.py`, `rag.py`, `indexar_teams.py` y `ask_teams.py`. En
+`api/modelos.py`, el bloque de I5; en `web/js/api.js`, el cliente SSE; en
+`tests/`, 71 pruebas más (193 en total).
+
+Dos endpoints: `POST /api/chat` (SSE) y `GET /api/chat/estado`.
+
+Decisiones y hallazgos:
+
+1. **La API importa `ask_teams`, no reimplementa nada**, que era el requisito
+   explícito de 3.5. `chat.py` son 170 líneas y ninguna hace una consulta: lo
+   único que decide es qué hacer cuando el módulo no se puede importar (503
+   con el volumen que falta) y cómo serializar los eventos.
+2. **`Depends(conexion)` no vale para una ruta que hace streaming.** Esa
+   dependencia cierra la conexión en su `finally` cuando la función retorna, y
+   un `StreamingResponse` sigue produciendo datos después: la base se cerraría
+   a mitad de la respuesta. Las conexiones se abren y se cierran **dentro** del
+   generador. Hay una prueba que lo comprueba consultando `meetings` en el
+   último evento del stream, que es el momento en el que habría fallado.
+3. **Un fallo del LLM viaja como evento `error`.** Un stream cortado en seco
+   deja al navegador esperando sin saber si la respuesta terminó o se rompió.
+   Y las fuentes se emiten **antes** del texto: si el modelo se cae a mitad,
+   quien preguntó ve igualmente de dónde habría salido la respuesta. Se
+   verificó parando el LLM: sale el mensaje legible y las cinco fuentes que el
+   SQL sí encontró.
+4. **La respuesta se repinta entera en cada trozo**, no se van añadiendo
+   nodos. Una cita puede llegar partida entre dos trozos (`[` en uno y `12]` en
+   el siguiente) y solo se puede enlazar mirando el texto completo.
+5. **Las citas no necesitaron nada nuevo**: el fragmento indexado guarda el
+   `idx` de su primer segmento, que es el ancla `#s-<idx>` que I2 dejó puesta
+   y que I4 ya reutilizaba. Un `[7]` que no corresponda a ninguna fuente se
+   deja como texto: el modelo se la ha inventado, y disfrazarla de enlace roto
+   sería peor que enseñarla.
+6. **Filtrar no es navegar**, al contrario que en el tablero y la búsqueda. Lo
+   que se comparte de esta vista es la respuesta (botón de exportar a
+   Markdown), y recargar la página a mitad de una conversación la perdería. El
+   historial vive en `sessionStorage`: el chat es de solo lectura y guardarlo
+   en la base rompería `TEAMS_API_SOLO_LECTURA`. Sí se acepta `?q=` para poder
+   enlazar «pregúntale esto».
+7. **Se dice con qué se está respondiendo.** Sin índice semántico la búsqueda
+   es solo literal y las respuestas son peores; la nota bajo el encabezado lo
+   dice, y `/api/chat/estado` lo devuelve de antemano. Va aparte de
+   `/api/salud` porque hace ping a LiteLLM y el pie de las cinco páginas no
+   debe pagarlo en cada carga.
+8. **El historial se valida en el contrato**: `TurnoDeChat.role` es
+   `Literal["user", "assistant"]`, así que un `system` colado desde el
+   navegador es un 422. Sin eso, el front podría inyectar instrucciones en el
+   prompt del modelo.
+9. **`sqlite-vec` es la primera dependencia nueva de la imagen desde I0**, así
+   que hubo que reexportarla; el tag sube a `0.2.0`. Y `docker-compose.yml`
+   monta ahora `ask_teams.py`, `rag.py` y `llm.py`: la misma trampa que I2
+   pisó con `summarize_teams.py`, esta vez prevista.
+
+Verificado:
+
+- **193 tests en verde** (69 de `memoria.py` + 62 de la API + 36 de `rag.py` +
+  26 de `ask_teams.py`), con la suite saltándose sola lo que necesita FastAPI
+  o `sqlite-vec`.
+- **En el navegador** (Chrome, vía el MCP de DevTools), contra una base de
+  demostración de 6 reuniones y 240 segmentos y un LiteLLM simulado que hace
+  chat, streaming y embeddings: la respuesta escribiéndose en directo, las
+  citas `[1][2][3]` abriendo la transcripción en `#s-0`, `#s-12` y `#s-24`, el
+  panel de fuentes con su clase y su línea, las preguntas sugeridas, el enlace
+  `?q=`, la exportación a Markdown (un blob `consulta.md`), el atajo `/`
+  callándose dentro del campo, tema claro y oscuro, ancho de móvil (420 px)
+  sin desplazamiento horizontal y **sin un solo mensaje en consola**.
+- **La degradación**, que era el requisito duro: retirando `indice.db`, el
+  estado pasa a `busqueda: "literal"` y el chat sigue respondiendo con FTS5
+  diciéndolo; parando el LLM, sale un evento `error` legible.
+
+**Tres fallos encontrados al mirarlo:** el estado de la búsqueda se pintaba
+**dos veces** en la misma pantalla (en la nota y en la ayuda); el encabezado de
+las fuentes decía «sin coincidencias» **habiendo cinco fuentes**, porque el
+modo se quedaba en `vacia` aunque la rama agregada sí hubiera encontrado cosas;
+y el botón «Preguntar» desactivado se veía exactamente igual que activo.
+
+**Verificado también en el servidor** (Ubuntu + L4, con los modelos reales):
+imagen `0.2.0` construida en el portátil, transferida y cargada con
+`docker load` sin contactar con ningún registro; el contenedor llega a los dos
+`llama-server` por `host.docker.internal`; `/api/chat/estado` devuelve
+`busqueda: "hibrida"` con los 9 fragmentos del índice real; y
+`POST /api/chat` responde en streaming en 24 s con su cita al segmento 80.
+
+**Pendiente:** el índice tiene una sola reunión, así que el ajuste de las dos
+constantes de `rag.py` —tamaño de ventana y presupuesto de caracteres— sigue
+esperando a que haya varias semanas acumuladas. Y la página del chat se ha
+visto en el navegador contra la base de demostración, no contra el servidor:
+allí solo se ha comprobado la API.
 
 ---
 

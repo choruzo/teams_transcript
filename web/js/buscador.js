@@ -1,6 +1,6 @@
 // El atajo global de teclado que lleva a la búsqueda (I4).
 //
-// Lo importan las cuatro páginas, porque «buscar dónde se dijo algo» es la
+// Lo importan las cinco páginas, porque «buscar dónde se dijo algo» es la
 // operación que se hace desde cualquier sitio y no un rincón de una vista.
 // Dos combinaciones, y las dos por el mismo motivo (que la gente ya las tiene
 // en los dedos): `/` como en GitHub o Gmail, y `Ctrl`/`Cmd` + `K` como en

@@ -241,6 +241,56 @@ Opciones en ambos scripts: `--glosario RUTA` para usar otro fichero,
 interna, y no debe versionarse. Si transcribes en otra máquina (ver
 `DEPLOY_OFFLINE.md`), cópialo también allí.
 
+## Uso: preguntar al histórico (`ask_teams.py`)
+
+Preguntas en castellano sobre lo que ha pasado en las reuniones, con la
+respuesta citando de dónde sale cada afirmación.
+
+```powershell
+$env:LITELLM_API_KEY = "sk-..."
+
+.\.venv\Scripts\python.exe ask_teams.py "¿qué lleva más tiempo bloqueado?"
+.\.venv\Scripts\python.exe ask_teams.py "¿qué dijo Pablo sobre el certificado?" --desde 2026-08-01
+.\.venv\Scripts\python.exe ask_teams.py "resumen de la semana" --json
+```
+
+Funciona en dos modos según lo que se le pregunte: lo que se **dijo** se busca
+en las transcripciones, y el **estado** del trabajo ("qué sigue abierto") sale
+de SQL directo, que es determinista y no se puede alucinar. Si el modelo no
+sabe algo, se le pide explícitamente que diga que no consta antes que
+inventarlo.
+
+Lo mismo está en la web, en `/chat.html`, con la respuesta escribiéndose en
+directo y las citas convertidas en enlaces a la frase exacta.
+
+### Índice semántico (opcional, recomendable)
+
+Sin nada más, la búsqueda de las transcripciones es literal: FTS5 no reduce a
+la raíz, así que «bloqueado» no encuentra «bloquear». Con un modelo de
+embeddings servido por el mismo LiteLLM se añade búsqueda por significado, y
+las dos se combinan.
+
+```powershell
+python -m pip install sqlite-vec
+
+# Construye datos/indice.db (por defecto: bge-m3, multilingüe)
+.\.venv\Scripts\python.exe indexar_teams.py --reconstruir
+.\.venv\Scripts\python.exe indexar_teams.py --info
+```
+
+Desde entonces se mantiene solo: `summarize_teams.py` indexa cada reunión al
+terminar (`--sin-indice` lo desactiva) y `python indexar_teams.py` sin flags
+pone al día lo que falte, sin repetir lo que ya está.
+
+**El índice es desechable**: se recalcula entero desde `meetings.db`, así que
+borrarlo no pierde nada. **Sin él, el chat responde igual** con búsqueda
+literal y lo dice en pantalla.
+
+Cuidado con una cosa: **`nomic-embed-text-v1.5` es solo inglés** y con
+transcripciones en castellano la recuperación empeora mucho sin dar ningún
+error. Si cambias de modelo, hay que reconstruir el índice —el CLI se niega a
+mezclar vectores de dos modelos, que es un fallo silencioso—.
+
 ## Notas técnicas
 
 - La captura del audio del sistema solo produce datos mientras el motor de

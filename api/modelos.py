@@ -6,6 +6,8 @@ devolver la fila de SQLite tal cual, que ataria la URL publica al esquema
 interno de la base.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -398,3 +400,53 @@ class PaginaDeBusqueda(BaseModel):
     marca_fin: str
     reuniones: list[ReunionConCoincidencias]
     coincidencias: list[Coincidencia]
+
+
+# --------------------------------------------------------------------------
+# I5: chat
+# --------------------------------------------------------------------------
+
+
+class TurnoDeChat(BaseModel):
+    """Un turno previo de la conversacion.
+
+    El historial lo guarda **el cliente**, no la base: el chat es de solo
+    lectura y guardarlo aqui romperia `TEAMS_API_SOLO_LECTURA`. Solo se
+    aceptan los dos papeles de una conversacion; un `system` colado por aqui
+    seria una inyeccion de instrucciones desde el navegador.
+    """
+
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=8000)
+
+
+class Pregunta(BaseModel):
+    """El cuerpo de `POST /api/chat`."""
+
+    pregunta: str = Field(min_length=1, max_length=2000)
+    historial: list[TurnoDeChat] = Field(default_factory=list, max_length=20)
+    desde: str | None = None
+    hasta: str | None = None
+    persona: str | None = None
+    tipo: str | None = None
+
+
+class EstadoDelChat(BaseModel):
+    """Que puede hacer el chat ahora mismo, y que no.
+
+    Va aparte de `/api/salud` a proposito: el pie de las cinco paginas no debe
+    hacer ping a LiteLLM en cada carga. Aqui si, porque la pagina del chat
+    necesita decir de antemano si va a responder y con que.
+    """
+
+    disponible: bool = Field(description="Si `ask_teams` se pudo importar")
+    motivo: str | None = Field(
+        default=None, description="Por que no esta disponible, si no lo esta"
+    )
+    modelo: str | None = None
+    busqueda: str = Field(
+        description="'hibrida' si hay indice semantico, 'literal' si solo FTS5"
+    )
+    indice: dict | None = Field(
+        default=None, description="Fragmentos, reuniones y modelo del indice"
+    )

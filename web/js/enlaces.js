@@ -50,3 +50,11 @@ export function urlBuscar(filtros = {}) {
   const consulta = parametros.toString();
   return consulta ? `/buscar.html?${consulta}` : "/buscar.html";
 }
+
+/**
+ * El chat (I5). Admite una pregunta en la dirección para que «pregúntale
+ * esto» se pueda enlazar; el historial, en cambio, vive solo en la pestaña.
+ */
+export function urlChat(pregunta = "") {
+  return pregunta ? `/chat.html?q=${encodeURIComponent(pregunta)}` : "/chat.html";
+}

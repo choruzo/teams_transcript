@@ -65,4 +65,102 @@ export const api = {
   // devuelve en `consulta_fts` cómo lo entendió, que es lo que permite
   // explicar un resultado raro sin adivinar.
   buscar: (filtros) => pedir("/buscar", filtros),
+  // Qué puede hacer el chat ahora mismo (I5). Va aparte de `/salud` porque
+  // hace ping a LiteLLM, y el pie de las otras páginas no debe pagarlo.
+  estadoDelChat: () => pedir("/chat/estado"),
+  chat: preguntar,
 };
+
+/**
+ * El chat (I5). No pasa por `pedir()` porque la respuesta no es un JSON sino
+ * un stream de eventos: hay que ir leyéndola según llega.
+ *
+ * Se usa `fetch` + `ReadableStream` y no `EventSource` porque `EventSource`
+ * solo sabe hacer GET, y la pregunta con su historial no cabe en una URL.
+ *
+ * `manejadores` recibe `{plan, fuentes, texto, fin, error}`; devuelve un
+ * `AbortController` para poder parar una respuesta a medias.
+ */
+function preguntar(cuerpo, manejadores = {}) {
+  const control = new AbortController();
+  (async () => {
+    let respuesta;
+    try {
+      respuesta = await fetch(BASE + "/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cuerpo),
+        signal: control.signal,
+      });
+    } catch (error) {
+      if (error.name !== "AbortError") {
+        manejadores.error?.("No se puede contactar con el servidor.");
+      }
+      return;
+    }
+    if (!respuesta.ok) {
+      // Aquí el error todavía es un JSON normal: el stream no ha empezado.
+      let detalle = `Error ${respuesta.status}`;
+      try {
+        const json = await respuesta.json();
+        if (json?.detail) {
+          detalle = typeof json.detail === "string"
+            ? json.detail
+            : JSON.stringify(json.detail);
+        }
+      } catch (_) { /* sin JSON: nos quedamos con el código */ }
+      manejadores.error?.(detalle);
+      return;
+    }
+    try {
+      await leerEventos(respuesta.body, manejadores);
+    } catch (error) {
+      if (error.name !== "AbortError") manejadores.error?.(error.message);
+      return;
+    }
+    manejadores.cierre?.();
+  })();
+  return control;
+}
+
+/**
+ * Parser mínimo de SSE: bloques separados por línea en blanco, con `event:` y
+ * una o más líneas `data:`.
+ *
+ * El buffer es imprescindible: un `read()` puede cortar por la mitad de un
+ * evento, y procesar medio JSON sería un error intermitente de los que solo
+ * aparecen con respuestas largas.
+ */
+async function leerEventos(cuerpo, manejadores) {
+  const lector = cuerpo.getReader();
+  const decodificador = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await lector.read();
+    if (done) break;
+    buffer += decodificador.decode(value, { stream: true });
+    let corte;
+    while ((corte = buffer.indexOf("\n\n")) !== -1) {
+      despachar(buffer.slice(0, corte), manejadores);
+      buffer = buffer.slice(corte + 2);
+    }
+  }
+  if (buffer.trim()) despachar(buffer, manejadores);
+}
+
+function despachar(bloque, manejadores) {
+  let evento = "message";
+  const datos = [];
+  for (const linea of bloque.split("\n")) {
+    if (linea.startsWith("event:")) evento = linea.slice(6).trim();
+    else if (linea.startsWith("data:")) datos.push(linea.slice(5).trim());
+  }
+  if (!datos.length) return;
+  let dato;
+  try {
+    dato = JSON.parse(datos.join("\n"));
+  } catch (_) {
+    return; // un keepalive o un bloque que no entendemos: se ignora
+  }
+  manejadores[evento]?.(dato);
+}

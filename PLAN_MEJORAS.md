@@ -621,3 +621,80 @@ Quedan pendientes de decidir, más adelante:
    cliente/servidor mínimo.
 3. Si la sección "Dudosos" del glosario debe alimentarse automáticamente:
    detectar términos que el LLM marca como no claros y proponerlos.
+
+---
+
+## Resultado de la Fase 4 (2026-09-09)
+
+Ficheros nuevos: `llm.py` (cliente LiteLLM, con streaming y embeddings),
+`rag.py` (índice semántico), `indexar_teams.py` (su CLI) y `ask_teams.py`. En
+`memoria.py`, dos consultas transversales (`updates_recientes`,
+`riesgos_recientes`); en `summarize_teams.py`, `call_litellm` pasa a delegar
+en `llm.chat` y se indexa la reunión al terminar; en `tests/`, 71 pruebas más
+(193 en total).
+
+Decisiones y hallazgos:
+
+1. **Se adelantó la búsqueda vectorial**, que este plan dejaba como escape a
+   futuro (sección Fase 4, nota sobre FTS5). El motivo es el que ya anticipaba
+   la nota: FTS5 no reduce a la raíz, así que «bloqueado» no encuentra
+   «bloquear», y la expansión de términos por el LLM lo tapa solo a medias.
+   La recuperación es **híbrida** con Reciprocal Rank Fusion, y sigue sin
+   entrar ninguna base vectorial: `sqlite-vec` es una extensión de SQLite.
+2. **El índice vive en `datos/indice.db`, no en `meetings.db`.** Es un
+   artefacto derivado y reconstruible; separarlo mantiene el histórico legible
+   con la stdlib pura —el venv de Whisper y una API sin la extensión no se
+   rompen— y no obliga a subir `ESQUEMA_VERSION` antes de que la fase I6 lo
+   necesite para `overrides`.
+3. **`nomic-embed-text-v1.5` se descartó por ser solo inglés.** Era el
+   candidato inicial; Nomic lo dice explícitamente y con transcripciones en
+   castellano la recuperación se degrada **sin dar ningún error**. El modelo
+   por defecto es **bge-m3** (1024 dims, multilingüe, 8k de contexto), que
+   además no necesita prefijos de tarea.
+4. **Mezclar vectores de dos modelos es el fallo silencioso de esto**, y por
+   eso el CLI se niega en seco y pide `--reconstruir`: las distancias se
+   siguen calculando igual, solo que no significan nada.
+5. **El intérprete es un lujo, no un requisito.** Si el LLM no responde o
+   devuelve JSON roto, se busca con la pregunta cruda, que funciona
+   sorprendentemente bien: las palabras que alguien escribe son casi siempre
+   las que están en la transcripción. Nada sin validar entra en una consulta,
+   con el mismo criterio de `normalizar()`.
+6. **La rama agregada deduplica.** Se vio con datos: el mismo bloqueo repetido
+   en cinco dailys son cinco copias del mismo texto que desplazan del contexto
+   a las fuentes que sí dicen algo distinto. Pasó de 29 fuentes a 14 en la
+   misma pregunta.
+7. **`summarize_teams.py` indexa al terminar**, y si falla solo avisa por
+   stderr: el `.md` y la base ya están guardados, que es lo que importa.
+   `--sin-indice` lo desactiva.
+
+Verificado:
+
+- **193 tests en verde**, y la suite sigue pasando sin `sqlite-vec` ni
+  FastAPI: esas pruebas se saltan solas, como en el servidor de
+  transcripción.
+- Contra la base real (1 reunión, 145 segmentos): 9 fragmentos indexados, un
+  segundo pase sin gastar ni una llamada, y `imputacion` recuperando su
+  fragmento con el hablante y la línea correctos.
+- Contra una base de demostración de 6 reuniones y 240 segmentos, con un
+  LiteLLM simulado que hace chat, streaming y embeddings: la pregunta
+  agregada, la puntual, las citas resolviendo a segmentos que existen, y la
+  degradación a búsqueda literal al retirar el índice.
+- **Contra los modelos reales del servidor** (Ubuntu + L4, vía SSH): índice
+  reconstruido con bge-m3 de verdad —9 fragmentos, 1024 dimensiones, 2
+  segundos—, la pregunta puntual «¿qué dijo Francisco sobre ULS?» respondida
+  correctamente y citando el segmento 80, y la agregada respondiendo «no
+  consta una duración concreta», que es lo honesto con una sola reunión en la
+  base. Las 194 pruebas también pasan allí (62 se saltan por no haber FastAPI
+  en el venv de Whisper).
+
+Dos cosas que solo se vieron con el modelo real:
+
+8. **No hay proxy LiteLLM en ese servidor**: son dos `llama-server` sueltos
+   (8000 el chat `qwen3.8-27b`, 8085 `bge-m3`). El código asumía una sola URL
+   para chat y embeddings, así que se añadió `TEAMS_EMBED_BASE_URL`; sin ella
+   habría que elegir cuál de los dos modelos funciona. Y la API key dejó de
+   ser obligatoria: un `llama-server` directo no pide ninguna.
+9. **El intérprete no era «una llamada barata».** `qwen3.8-27b` es un modelo
+   de razonamiento y gastaba ~30 s pensando antes de escribir el JSON de
+   filtros. Pidiéndole `reasoning_effort: "none"` —con reintento sin el campo
+   si el backend no lo conoce— la pregunta completa bajó de **1m42s a 28s**.

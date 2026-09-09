@@ -1205,3 +1205,135 @@ kbd {
      general de .filtros .campo; lo que sobra es el ancho mínimo. */
   .filtros .campo.ancho { flex-basis: auto; }
 }
+
+/* ------------------------------------------------------------------------ */
+/* Chat (I5)                                                                */
+/* ------------------------------------------------------------------------ */
+
+/* La conversación crece hacia abajo y el formulario se queda debajo, no
+   flotando: en una página con cabecera y pie fijos, un compositor pegado al
+   borde inferior se solapa con el pie en cuanto la ventana es baja. */
+.conversacion {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  margin: 0.8rem 0 1rem;
+  min-height: 8rem;
+}
+
+.turno { display: flex; }
+.turno.mio { justify-content: flex-end; }
+
+.turno .burbuja {
+  max-width: 46rem;
+  padding: 0.7rem 0.95rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radio);
+  background: var(--panel);
+  line-height: 1.55;
+}
+
+/* La pregunta se distingue por color de superficie, no por alineación sola:
+   con el ancho de un móvil las dos burbujas ocupan la fila entera. */
+.turno.mio .burbuja {
+  background: color-mix(in srgb, var(--verde2) 18%, var(--panel));
+  border-color: color-mix(in srgb, var(--verde2) 45%, var(--line));
+}
+
+.turno .burbuja p { margin: 0 0 0.6rem; }
+.turno .burbuja p:last-child { margin-bottom: 0; }
+
+/* Mientras escribe, un cursor al final del último párrafo. Es la única señal
+   de que sigue vivo cuando el modelo tarda entre trozo y trozo. */
+.turno.escribiendo .burbuja > p:last-of-type::after {
+  content: "▍";
+  color: var(--verde);
+  animation: latido 1s steps(2) infinite;
+}
+
+@keyframes latido { 50% { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .turno.escribiendo .burbuja > p:last-of-type::after { animation: none; }
+}
+
+/* La cita: lo que convierte una afirmación en algo comprobable. Se marca como
+   enlace y no como texto para que se vea que lleva a alguna parte. */
+.cita {
+  color: var(--azul);
+  text-decoration: none;
+  font-size: 0.85em;
+  padding: 0 0.1em;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--azul2) 45%, transparent);
+}
+
+.cita:hover { background: color-mix(in srgb, var(--azul) 28%, transparent); }
+
+/* Las fuentes van plegadas: acompañan a la respuesta, no compiten con ella. */
+.fuentes { margin-top: 0.8rem; border-top: 1px solid var(--line); padding-top: 0.6rem; }
+.fuentes summary { cursor: pointer; color: var(--dim); font-size: 0.85rem; }
+.fuentes .tenue { margin: 0.5rem 0 0; }
+
+.lista-fuentes { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.6rem; }
+
+.fuente {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 0.15rem 0.5rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radio-s);
+  background: var(--panel2);
+  color: inherit;
+  text-decoration: none;
+  font-size: 0.85rem;
+}
+
+a.fuente:hover { border-color: color-mix(in srgb, var(--verde) 45%, var(--line)); }
+
+.fuente .n { font-family: var(--mono); color: var(--verde); }
+.fuente .clase { color: var(--dim); }
+.fuente .donde { color: var(--dim); }
+.fuente .dicho { grid-column: 1 / -1; color: var(--text); }
+
+/* El compositor. Hereda la jerarquía de botones de `.filtros` (submit relleno,
+   button fantasma), así que no necesita clases propias. */
+.filtros.preguntar { align-items: flex-end; }
+.filtros.preguntar .campo.ancho { flex: 1 1 24rem; }
+
+/* Mientras el modelo escribe, «Preguntar» esta desactivado. Sin esto se
+   veria exactamente igual que activo y la unica pista de que no hace nada
+   seria que no hace nada. */
+.filtros.preguntar button[disabled] { opacity: 0.5; cursor: default; }
+
+/* Los filtros van plegados: el caso normal es preguntar sin acotar nada, y
+   cuatro controles siempre visibles harían pensar que hay que rellenarlos. */
+.acotar { margin-top: 1rem; }
+.acotar summary { cursor: pointer; color: var(--dim); font-size: 0.85rem; }
+.acotar .filtros { margin-top: 0.6rem; }
+.acotar .tenue { margin: 0.4rem 0 0; }
+
+/* Las preguntas sugeridas, en el hueco de la conversación. */
+.sugerencias { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.6rem 0; }
+
+.sugerencia {
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel2);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.sugerencia:hover { border-color: color-mix(in srgb, var(--verde) 50%, var(--line)); }
+
+@media (max-width: 560px) {
+  /* La burbuja de la pregunta ya no cabe alineada a la derecha con margen. */
+  .turno .burbuja { max-width: 100%; }
+  .fuente { grid-template-columns: auto 1fr; }
+  .fuente .clase { grid-column: 2; }
+  .fuente .donde { grid-column: 1 / -1; }
+}

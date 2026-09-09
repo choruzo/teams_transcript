@@ -102,7 +102,7 @@ Reglas propias de esta capa:
 ## Vista de reunión (I2)
 
 La segunda página del front (`reunion.html`). No hay enrutado del lado del
-cliente: son ficheros estáticos (cuatro desde I4) y el navegador ya sabe ir de
+cliente: son ficheros estáticos (cinco desde I5) y el navegador ya sabe ir de
 uno a otro; un router propio solo tendría sentido si hubiera estado que
 conservar entre vistas. Las direcciones del front viven en `js/enlaces.js`, como las del
 servidor viven en `js/api.js`, y siempre llevan el `uid` —nunca el `id`—
@@ -185,10 +185,36 @@ La cuarta página (`buscar.html`). Lo propio de esta vista:
    «reuniones», y quien no lo sepa concluirá que la herramienta no funciona.
 
 El atajo global (`/`, o `Ctrl`/`Cmd`+`K`) vive en `js/buscador.js` y lo
-importan las cuatro páginas. `/` se ignora si el foco está en un campo de
+importan las cinco páginas. `/` se ignora si el foco está en un campo de
 texto —ahí es una barra—; el de modificador no, porque se pulsa a propósito.
 En la propia página de búsqueda enfoca el campo y selecciona lo que hubiera,
 en vez de navegar a donde ya se está.
+
+## Chat (I5)
+
+La quinta página (`chat.html`). Lo propio de esta vista:
+
+- **La cita es el producto.** Cada `[n]` de la respuesta se convierte en un
+  enlace al segmento exacto (`urlSegmento`, el ancla `#s-<idx>` que dejó I2).
+  Se escapa el HTML **primero** y se sustituyen las citas **después**, igual
+  que el resaltado de la búsqueda y por el mismo motivo. Un `[7]` que no
+  corresponda a ninguna fuente se deja como texto: el modelo se la ha
+  inventado, y disfrazarla de enlace roto sería peor que enseñarla.
+- **La respuesta se repinta entera en cada trozo**, no se van añadiendo nodos.
+  Una cita puede llegar partida entre dos trozos (`[` en uno y `12]` en el
+  siguiente) y solo se puede enlazar mirando el texto completo.
+- **Filtrar no es navegar**, al revés que en el tablero y en la búsqueda. Lo
+  que se comparte aquí es la respuesta (botón de exportar a Markdown), y
+  recargar a mitad de una conversación la perdería. El historial vive en
+  `sessionStorage`, no en la base: el chat es de solo lectura.
+- **Se dice con qué se está respondiendo** bajo el encabezado: búsqueda
+  híbrida o solo literal. Una respuesta pobre puede ser culpa de que falte el
+  índice semántico y no de que el histórico no lo tenga.
+- Las fuentes van en un `<details>` plegado: acompañan a la respuesta, no
+  compiten con ella. Se emiten **antes** que el texto, así que si el modelo se
+  cae a mitad se ve igualmente de dónde habría salido.
+- El compositor hereda la jerarquía de botones de `.filtros` (submit relleno,
+  `button` fantasma) sin clases propias, como manda la sección de formularios.
 
 ## Decir lo que el dato soporta
 
@@ -212,7 +238,7 @@ Un solo botón en la cabecera con tres estados de hecho:
   texto («Claro»/«Oscuro») no dice si nombra el estado actual o el destino.
 
 La lectura de `localStorage` está duplicada a propósito en un `<script>` inline
-del `<head>` de **cada página** (las cuatro: `index.html`, `reunion.html`, `acciones.html` y `buscar.html`): `js/tema.js` es un módulo y por tanto diferido, así
+del `<head>` de **cada página** (las cinco: `index.html`, `reunion.html`, `acciones.html`, `buscar.html` y `chat.html`): `js/tema.js` es un módulo y por tanto diferido, así
 que sin ese fragmento la página parpadearía en oscuro antes de pasar a claro.
 Los accesos a `localStorage` van en `try/catch` porque en modo incógnito o con
 las cookies bloqueadas lanzan; en ese caso se sigue al sistema y no se recuerda.

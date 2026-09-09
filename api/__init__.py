@@ -8,4 +8,4 @@ Regla del proyecto: **aqui no se escribe SQL**. Toda consulta vive en
 pipeline, esta API y los futuros `ask_teams.py` / `report_teams.py`.
 """
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"

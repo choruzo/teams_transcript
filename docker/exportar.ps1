@@ -14,7 +14,7 @@
 # monta como volumen. Ver docker\DESPLIEGUE.md.
 
 param(
-    [string]$Version = "0.1.0",
+    [string]$Version = "0.2.0",
     [string]$Destino = "dist"
 )
 

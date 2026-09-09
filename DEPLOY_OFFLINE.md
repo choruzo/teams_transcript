@@ -171,3 +171,126 @@ python transcribe_teams.py mixed.wav --diarize --device cuda
 Si el servidor SÍ tuviera acceso a `huggingface.co`, la alternativa más
 simple es no copiar nada y pasar `--hf-token`/`HF_TOKEN` como en Windows,
 dejando que descargue los modelos directamente ahí.
+
+---
+
+## 6. Índice semántico del chat (`sqlite-vec` + bge-m3) sin internet
+
+El chat de la web (fase I5) busca de dos formas a la vez: FTS5, que ya
+funciona sin nada más, y búsqueda vectorial sobre `datos/indice.db`. Esta
+segunda parte necesita dos piezas que hay que llevar al servidor a mano.
+
+**Sin ellas el chat sigue funcionando**, con búsqueda solo literal, y lo dice
+en pantalla. No es un requisito para desplegar: es una mejora de calidad.
+
+### a) El wheel de `sqlite-vec` (en una máquina CON internet)
+
+```bash
+# Es un wheel por plataforma: hay que pedir el de Linux x86_64.
+pip download sqlite-vec==0.1.9 \
+    --only-binary=:all: --platform manylinux2014_x86_64 \
+    --python-version 3.12 -d bundle/wheelhouse-vec
+```
+
+En el servidor, dentro del venv que usa el pipeline:
+
+```bash
+pip install --no-index --find-links bundle/wheelhouse-vec sqlite-vec
+python -c "import sqlite_vec, sqlite3; c=sqlite3.connect(':memory:'); \
+c.enable_load_extension(True); sqlite_vec.load(c); print(c.execute('select vec_version()').fetchone())"
+```
+
+Si esa comprobación falla con `AttributeError: enable_load_extension`, el
+Python del sistema se compiló sin extensiones cargables y hay que usar otro
+intérprete; el resto del proyecto no se ve afectado.
+
+**La API también lo necesita**, pero ahí va dentro de la imagen Docker
+(`requirements-api.txt`), así que basta con reexportarla: ver
+`docker/DESPLIEGUE.md`.
+
+### b) El modelo de embeddings
+
+**Puede que no haya proxy LiteLLM.** El servidor de este proyecto tiene dos
+`llama-server` (llama.cpp) sueltos, cada uno con su modelo y su puerto, y
+ambos exponen `/v1` compatible con OpenAI. Los dos montajes funcionan; solo
+cambia cómo se configuran.
+
+Averiguar qué hay escuchando:
+
+```bash
+ss -ltnp | grep -E "llama|4000"
+curl -s http://localhost:8000/v1/models   # chat
+curl -s http://localhost:8085/v1/models   # embeddings
+```
+
+**Con `llama-server` directo** (el caso de este servidor): dos URL distintas y
+ninguna clave. `TEAMS_EMBED_BASE_URL` existe precisamente para esto; sin ella
+habría que elegir cuál de los dos modelos funciona.
+
+```bash
+LITELLM_BASE_URL=http://localhost:8000/v1     # chat
+TEAMS_EMBED_BASE_URL=http://localhost:8085/v1 # embeddings
+TEAMS_LLM_MODELO=qwen3.8-27b
+TEAMS_EMBED_MODELO=bge-m3
+LITELLM_API_KEY=                              # vacía: no pide ninguna
+```
+
+El nombre del modelo da igual con `llama-server`: sirve el que tenga cargado,
+así que `bge-m3` vale aunque su `/v1/models` devuelva la ruta del `.gguf`.
+
+**Ojo con `localhost` frente a `host.docker.internal`**: el pipeline corre en
+el host y usa `localhost`; la API corre en el contenedor, donde `localhost` es
+el propio contenedor. En el `.env` (que lee Docker Compose) van las URL con
+`host.docker.internal`, que el compose resuelve con `extra_hosts`. Y el
+`llama-server` tiene que escuchar en `0.0.0.0`, no solo en `127.0.0.1`, o el
+contenedor no llegará.
+
+**Con un proxy LiteLLM delante**: una sola URL para los dos, y
+`TEAMS_EMBED_BASE_URL` no hace falta.
+
+#### Dar de alta bge-m3 en LiteLLM
+
+Se usa **bge-m3** (1024 dimensiones, multilingüe). El detalle que importa:
+`nomic-embed-text-v1.5` **es solo inglés** y con transcripciones en castellano
+la recuperación se degrada mucho sin dar ningún error, así que no vale.
+
+```yaml
+# config.yaml de LiteLLM, junto al modelo de chat
+model_list:
+  - model_name: bge-m3
+    litellm_params:
+      model: openai/bge-m3           # el backend expone /v1/embeddings
+      api_base: http://localhost:8081/v1
+      api_key: none
+```
+
+Comprobar que responde antes de indexar:
+
+```bash
+curl http://localhost:4000/v1/embeddings -H "Authorization: Bearer $LITELLM_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"model": "bge-m3", "input": "prueba"}' | head -c 200
+```
+
+### c) Construir el índice
+
+```bash
+export LITELLM_API_KEY=...      # o pásala con --api-key
+python indexar_teams.py --reconstruir
+python indexar_teams.py --info  # debe decir "Busqueda: hibrida"
+```
+
+Desde entonces se mantiene solo: `summarize_teams.py` indexa cada reunión al
+terminar, y `python indexar_teams.py` (sin flags) recupera lo que falte.
+
+Detalles que ahorran una tarde:
+
+- **`datos/indice.db` es desechable.** No contiene nada que no se pueda
+  recalcular desde `meetings.db`; borrarlo y reconstruirlo es seguro.
+- **Cambiar de modelo de embeddings obliga a `--reconstruir`**, y el CLI se
+  niega a hacer otra cosa. Vectores de dos modelos en el mismo índice dan
+  resultados sin sentido **sin dar ningún error**.
+- Si el modelo que elijas exige prefijos de tarea (nomic, e5), ponlos en
+  `TEAMS_EMBED_PREFIJO` y `TEAMS_EMBED_PREFIJO_CONSULTA`. bge-m3 no los lleva.
+- La API abre el índice en **solo lectura**: el contenedor no lo escribe nunca,
+  lo construye el pipeline en el host.
