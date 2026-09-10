@@ -1684,6 +1684,276 @@ def carriles_acciones(
     ).fetchall()
 
 
+# --------------------------------------------------------------------------
+# Informes agregados (Fase 5 del motor: report_teams.py)
+# --------------------------------------------------------------------------
+
+# Las cuatro consultas de abajo existen porque el informe pregunta cosas que
+# ni el tablero ni las metricas responden: que se **cerro** en el periodo, que
+# bloqueo se repite, quien lleva sin aparecer y que accion lleva reuniones sin
+# mencionarse. Viven aqui, como todo el SQL, y no en `report_teams.py`.
+
+
+def acciones_cerradas(
+    conn: sqlite3.Connection,
+    *,
+    desde: str | None = None,
+    hasta: str | None = None,
+    persona: str | None = None,
+    limite: int = 100,
+) -> list[sqlite3.Row]:
+    """Acciones que se dieron por cerradas dentro del periodo.
+
+    **`cerrada_en` es la fecha en que se proceso la reunion que las cerro, no
+    la del cierre real** (D4). Es la unica que hay, y quien la muestre tiene
+    que decirlo: una daily del jueves procesada el lunes cierra sus acciones
+    con fecha de lunes.
+    """
+    condiciones = [
+        f"a.estado IN ({_placeholders(ESTADOS_CERRADOS)})",
+        "a.cerrada_en IS NOT NULL",
+    ]
+    valores: list = list(ESTADOS_CERRADOS)
+    if desde:
+        condiciones.append("a.cerrada_en >= ?")
+        valores.append(desde)
+    if hasta:
+        condiciones.append("a.cerrada_en <= ?")
+        valores.append(hasta)
+    if persona:
+        if persona == SIN_RESPONSABLE:
+            condiciones.append("a.persona_id IS NULL")
+        else:
+            condiciones.append("p.nombre = ? COLLATE NOCASE")
+            valores.append(persona)
+    valores.append(limite)
+    return conn.execute(
+        f"""
+        SELECT a.id, a.descripcion, a.estado, a.menciones, a.cerrada_en,
+               p.nombre AS persona,
+               mo.uid AS origen_uid, mo.fecha AS origen_fecha,
+               mo.titulo AS origen_titulo,
+               COALESCE(mu.uid, mo.uid) AS ultima_uid,
+               COALESCE(mu.fecha, mo.fecha) AS ultima_fecha
+        {_DESDE_ACCIONES}
+         WHERE {" AND ".join(condiciones)}
+         ORDER BY a.cerrada_en DESC, a.id
+         LIMIT ?
+        """,
+        valores,
+    ).fetchall()
+
+
+def _huella_bloqueo(texto: str) -> str:
+    """Clave de agrupacion de un bloqueo: sin acentos, sin puntuacion, plano."""
+    limpio = sin_acentos(texto).lower()
+    limpio = re.sub(r"[^a-z0-9 ]+", " ", limpio)
+    return " ".join(limpio.split())
+
+
+def bloqueos_recurrentes(
+    conn: sqlite3.Connection,
+    *,
+    desde: str | None = None,
+    hasta: str | None = None,
+    persona: str | None = None,
+    minimo: int = 2,
+    limite: int = 20,
+) -> list[dict]:
+    """Bloqueos que aparecen en varias reuniones, agrupados por texto.
+
+    D8 dice que el dato no existe: `updates.bloqueos` es texto libre y nadie
+    le ha dado identidad. Lo que se hace aqui es lo unico defendible sin
+    inventar nada: **normalizar el texto** (acentos, mayusculas y puntuacion
+    fuera) y contar en cuantas reuniones distintas aparece esa misma frase. Un
+    bloqueo contado dos veces con otras palabras no se detecta, y el informe
+    lo advierte en vez de presentarlo como una deteccion de temas.
+
+    La agrupacion va en Python, no en SQL, por lo mismo que las semanas: se
+    apoya en `sin_acentos`, que es una funcion nuestra, y aqui hay que
+    quedarse ademas con la redaccion mas reciente de cada grupo.
+    """
+    condiciones = ["u.bloqueos IS NOT NULL", "trim(u.bloqueos) != ''"]
+    valores: list = []
+    if desde:
+        condiciones.append("m.fecha >= ?")
+        valores.append(desde)
+    if hasta:
+        condiciones.append("m.fecha <= ?")
+        valores.append(hasta)
+    if persona:
+        condiciones.append("sin_acentos(p.nombre) LIKE '%' || sin_acentos(?) || '%'")
+        valores.append(persona)
+    filas = conn.execute(
+        f"""
+        SELECT u.bloqueos, u.meeting_id,
+               COALESCE(p.nombre, 'no identificado') AS persona,
+               m.uid, m.fecha, m.titulo
+          FROM updates u
+          LEFT JOIN personas p ON p.id = u.persona_id
+          JOIN meetings m ON m.id = u.meeting_id
+         WHERE {" AND ".join(condiciones)}
+         ORDER BY m.fecha, u.id
+        """,
+        valores,
+    ).fetchall()
+
+    grupos: dict[str, dict] = {}
+    for fila in filas:
+        huella = _huella_bloqueo(fila["bloqueos"])
+        if not huella:
+            continue
+        grupo = grupos.setdefault(
+            huella,
+            {
+                "texto": fila["bloqueos"].strip(),
+                "reuniones": [],
+                "personas": [],
+                "primera_fecha": fila["fecha"],
+                "ultima_fecha": fila["fecha"],
+            },
+        )
+        # La redaccion que se ensena es la ultima, que es la que la gente
+        # reconoce: las filas vienen ordenadas por fecha ascendente.
+        grupo["texto"] = fila["bloqueos"].strip()
+        grupo["ultima_fecha"] = fila["fecha"]
+        if fila["meeting_id"] not in [r["meeting_id"] for r in grupo["reuniones"]]:
+            grupo["reuniones"].append(
+                {
+                    "meeting_id": fila["meeting_id"],
+                    "uid": fila["uid"],
+                    "fecha": fila["fecha"],
+                    "titulo": fila["titulo"],
+                }
+            )
+        if fila["persona"] not in grupo["personas"]:
+            grupo["personas"].append(fila["persona"])
+
+    recurrentes = [
+        {**grupo, "n_reuniones": len(grupo["reuniones"])}
+        for grupo in grupos.values()
+        if len(grupo["reuniones"]) >= minimo
+    ]
+    recurrentes.sort(key=lambda g: (-g["n_reuniones"], g["texto"].lower()))
+    return recurrentes[:limite]
+
+
+def personas_sin_actualizar(
+    conn: sqlite3.Connection,
+    *,
+    hasta: str | None = None,
+    dias: int | None = None,
+    limite: int = 50,
+) -> list[dict]:
+    """Cuando dio cada persona su ultima actualizacion, y que arrastra abierto.
+
+    **No es un control de asistencia** (D7): sin roster no se puede distinguir
+    "no ha hablado" de "ya no esta en el equipo", ni saber quien falta y no
+    aparece en ninguna tabla. Solo se ven las personas que la base conoce, y
+    el informe lo dice.
+
+    `hasta` recorta el "hoy" contra el que se cuentan los dias, para que un
+    informe de un periodo pasado no diga que todo el mundo lleva meses sin
+    hablar. `dias` filtra a partir de cuantos se considera reportable.
+    """
+    referencia = hasta or _hoy(conn)
+    filas = conn.execute(
+        f"""
+        SELECT p.nombre AS persona,
+               (SELECT max(m.fecha) FROM updates u
+                  JOIN meetings m ON m.id = u.meeting_id
+                 WHERE u.persona_id = p.id
+                   AND m.fecha <= ?) AS ultimo_update,
+               (SELECT count(*) FROM actions a
+                 WHERE a.persona_id = p.id
+                   AND a.estado NOT IN ({_placeholders(ESTADOS_CERRADOS)}))
+                   AS abiertas,
+               (SELECT count(*) FROM actions a
+                 WHERE a.persona_id = p.id
+                   AND a.menciones >= ?
+                   AND a.estado NOT IN ({_placeholders(ESTADOS_CERRADOS)}))
+                   AS estancadas
+          FROM personas p
+         ORDER BY p.nombre
+        """,
+        (referencia, *ESTADOS_CERRADOS, UMBRAL_ESTANCAMIENTO, *ESTADOS_CERRADOS),
+    ).fetchall()
+
+    resultado = []
+    for fila in filas:
+        registro = dict(fila)
+        if registro["ultimo_update"]:
+            try:
+                registro["dias_sin_update"] = (
+                    date.fromisoformat(referencia)
+                    - date.fromisoformat(registro["ultimo_update"])
+                ).days
+            except ValueError:
+                registro["dias_sin_update"] = None
+        else:
+            # Nunca ha dado un update: existe porque alguien le asigno una
+            # accion o porque hablo en una transcripcion.
+            registro["dias_sin_update"] = None
+        if not registro["abiertas"] and registro["ultimo_update"] is None:
+            continue
+        if dias is not None:
+            if registro["dias_sin_update"] is None or registro["dias_sin_update"] < dias:
+                continue
+        resultado.append(registro)
+
+    resultado.sort(
+        key=lambda r: (
+            -(r["dias_sin_update"] if r["dias_sin_update"] is not None else 10**6),
+            -r["abiertas"],
+            r["persona"].lower(),
+        )
+    )
+    return resultado[:limite]
+
+
+def acciones_sin_mencion(
+    conn: sqlite3.Connection,
+    *,
+    minimo: int = 1,
+    limite: int = 50,
+) -> list[sqlite3.Row]:
+    """Acciones abiertas y cuantas reuniones se han celebrado sin nombrarlas.
+
+    Es el pendiente que la Fase 2 dejo anotado: el modelo puede responder
+    `sin_mencion` a un arrastre, pero eso no cambia nada en la base y por
+    tanto no se ve en ningun `.md`. Aqui el dato se **deduce**: reuniones
+    posteriores a la ultima que la menciono.
+
+    Se cuenta por fecha, asi que dos reuniones del mismo dia que la ultima
+    mencion no suman. Es el historico entero, no el periodo: una accion no
+    tiene fecha propia y recortarla daria un numero sin sentido, igual que en
+    `metricas()`.
+    """
+    return conn.execute(
+        f"""
+        SELECT a.id, a.descripcion, a.estado, a.menciones,
+               p.nombre AS persona,
+               mo.uid AS origen_uid, mo.fecha AS origen_fecha,
+               mo.titulo AS origen_titulo,
+               COALESCE(mu.uid, mo.uid) AS ultima_uid,
+               COALESCE(mu.fecha, mo.fecha) AS ultima_fecha,
+               -- El WHERE ya deja fuera las cerradas, asi que aqui la
+               -- definicion de estancada se reduce al umbral de menciones.
+               (a.menciones >= ?) AS estancada,
+               (SELECT count(*) FROM meetings m2
+                 WHERE m2.fecha > COALESCE(mu.fecha, mo.fecha))
+                   AS reuniones_sin_mencion
+        {_DESDE_ACCIONES}
+         WHERE a.estado NOT IN ({_placeholders(ESTADOS_CERRADOS)})
+           AND (SELECT count(*) FROM meetings m2
+                 WHERE m2.fecha > COALESCE(mu.fecha, mo.fecha)) >= ?
+         ORDER BY reuniones_sin_mencion DESC, a.menciones DESC, a.id
+         LIMIT ?
+        """,
+        (UMBRAL_ESTANCAMIENTO, *ESTADOS_CERRADOS, minimo, limite),
+    ).fetchall()
+
+
 # `excluir_meeting_id` no se limita a filtrar: simula el efecto de
 # `_deshacer_arrastres`, porque al reprocesar una reunion esa pasada se va a
 # deshacer igualmente. Sin esto, una accion ajena que la pasada anterior marco

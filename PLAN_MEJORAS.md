@@ -1,7 +1,8 @@
 # Plan de mejoras: de "transcriptor" a "memoria del equipo"
 
-Redactado el 2026-09-07. **Fases 0, 1 y 2 implementadas** (las fases 1 y 2 el
-2026-09-08); el resto es propuesta.
+Redactado el 2026-09-07. **Fases 0, 1, 2, 4 y 5 implementadas** (las fases 1 y
+2 el 2026-09-08; la 4 y la 5 después); quedan la 3 (perfiles de voz) y la 6
+(map-reduce).
 
 Este documento cubre el **motor** (glosario, JSON estructurado, SQLite,
 arrastres, consulta y perfiles de voz). La **interfaz web** que lo consume
@@ -432,10 +433,10 @@ Verificado de extremo a extremo contra un servidor que imita
   de la pasada anterior (las menciones vuelven a 1), como corresponde a
   reprocesar la reunión sin arrastres.
 
-**Pendiente, menor:** las acciones abiertas que el modelo marca `sin_mencion`
-no aparecen en el `.md`; su seguimiento (cuántas reuniones llevan sin
-mencionarse) queda para el `report_teams.py` de la Fase 5, que es donde
-encaja.
+**Pendiente, menor — resuelto en la Fase 5:** las acciones abiertas que el
+modelo marca `sin_mencion` no aparecen en el `.md`. Su seguimiento (cuántas
+reuniones llevan sin mencionarse) lo da ahora `report_teams.py`, deduciéndolo
+de las reuniones posteriores a la última mención (`memoria.acciones_sin_mencion`).
 
 ---
 
@@ -478,7 +479,7 @@ nombre para la misma persona en dos reuniones distintas.
 
 ---
 
-## Fase 4 — `ask_teams.py`: preguntar sobre el pasado
+## Fase 4 — `ask_teams.py`: preguntar sobre el pasado — **implementada**
 
 **Resuelve:** el caso de uso principal de gestión. **Esfuerzo:** medio.
 
@@ -511,7 +512,7 @@ tendría que cambiar.
 
 ---
 
-## Fase 5 — `report_teams.py`: informes agregados
+## Fase 5 — `report_teams.py`: informes agregados — **implementada (2026-09-10)**
 
 **Esfuerzo:** bajo una vez existen las fases 1 y 2 (es casi todo SQL).
 
@@ -530,6 +531,46 @@ Contenido:
 
 Los números salen de SQL (deterministas, no alucinables) y el LLM solo escribe
 la narrativa alrededor. Salida en Markdown.
+
+### Lo que cambió al implementarla (2026-09-10)
+
+1. **Los cinco contenidos están, pero tres de ellos solo se podían dar
+   diciendo lo que no significan.** El plan los listaba como si el dato
+   existiera y en dos casos no existe del todo:
+   - *Acciones cerradas en el periodo*: `cerrada_en` es la fecha en que se
+     procesó la reunión que las cerró, no la del cierre real (D4). Se da
+     igualmente, con la advertencia al pie de la lista.
+   - *Bloqueos recurrentes*: `updates.bloqueos` es texto libre sin identidad
+     (D8). `memoria.bloqueos_recurrentes` normaliza el texto (acentos,
+     mayúsculas y puntuación fuera) y cuenta en cuántas reuniones distintas
+     aparece esa misma frase. **No es detección de temas**: uno contado con
+     otras palabras no se detecta, y el informe lo dice.
+   - *Personas sin actualización reciente*: sin roster (D7) no se puede
+     distinguir "no ha hablado" de "ya no está". Solo se ven las personas que
+     la base ya conoce, y también se dice.
+   La quinta —"señales de sobrecarga"— no se ha aproximado: no hay ningún dato
+   que la soporte y un número inventado en un informe es peor que su ausencia.
+2. **El pendiente de la Fase 2 queda cerrado aquí**, que es donde el plan
+   anotó que encajaba. `memoria.acciones_sin_mencion` deduce cuántas reuniones
+   se han celebrado sin nombrar cada acción abierta contando las posteriores a
+   su última mención, sin necesidad de guardar nada nuevo.
+3. **La narrativa nunca bloquea el informe.** Mismo criterio que el intérprete
+   de `ask_teams.py`: si el LLM no responde, salen las tablas y una nota
+   diciendo por qué falta el análisis. `--sin-llm` ni lo intenta y `--json`
+   vuelca solo las cifras.
+4. **Los recuentos de cabecera se recalculan con el filtro de `--persona`** en
+   vez de tomarse de `metricas()`, que no lo conoce. Y como el filtro no
+   alcanza a las reuniones ni a los riesgos (no tienen responsable), la
+   cabecera del informe declara hasta dónde llega.
+5. **`--referencia`**, que el plan no preveía: `--semanal`/`--mensual` se
+   calculan sobre hoy, y sin esto no había forma de sacar el informe de la
+   semana pasada.
+
+Cubierto por `tests/test_report.py` (42 pruebas: las cuatro consultas nuevas
+de `memoria.py`, los periodos, el alcance mezclado de las cifras, el filtro de
+persona, la degradación sin LLM y que cada advertencia aparezca cuando su
+lista tiene filas). Verificado además de extremo a extremo contra un servidor
+que imita `/chat/completions`.
 
 ---
 
@@ -558,8 +599,8 @@ reuniones juntas no caben en la ventana del modelo local. Se necesita:
 | ~~1~~ | ~~Fase 0 — Glosario~~ **hecha** | Bajo | Nulo | Calidad de todo lo demás |
 | ~~2~~ | ~~Fase 1 — JSON + SQLite~~ **hecha** | Medio | Bajo | Fases 2, 4, 5 |
 | ~~3~~ | ~~Fase 2 — Arrastres~~ **hecha** | Bajo | Bajo | El valor de gestión |
-| 4 | Fase 4 — `ask_teams.py` | Medio | Bajo | Consulta del histórico |
-| 5 | Fase 5 — `report_teams.py` | Bajo | Nulo | Informes |
+| ~~4~~ | ~~Fase 4 — `ask_teams.py`~~ **hecha** | Medio | Bajo | Consulta del histórico |
+| ~~5~~ | ~~Fase 5 — `report_teams.py`~~ **hecha** | Bajo | Nulo | Informes |
 | 6 | Fase 3 — Perfiles de voz | Medio-alto | **Alto** | Calidad a largo plazo |
 | 7 | Fase 6 — Map-reduce | Medio | Medio | Reuniones largas |
 

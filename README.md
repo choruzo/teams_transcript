@@ -291,6 +291,41 @@ transcripciones en castellano la recuperación empeora mucho sin dar ningún
 error. Si cambias de modelo, hay que reconstruir el índice —el CLI se niega a
 mezclar vectores de dos modelos, que es un fallo silencioso—.
 
+## Uso: informes agregados (`report_teams.py`)
+
+Mientras `ask_teams.py` responde a una pregunta concreta, esto saca la foto
+completa de un periodo: qué sigue abierto y desde cuándo, qué se cerró, qué
+bloqueo se repite reunión tras reunión y quién lleva tiempo sin dar novedades.
+
+```powershell
+# La semana ISO en curso (lunes a domingo)
+.\.venv\Scripts\python.exe report_teams.py --semanal
+
+# El mes natural, a un fichero
+.\.venv\Scripts\python.exe report_teams.py --mensual --salida informes\septiembre.md
+
+# Un periodo cualquiera, o solo lo de una persona
+.\.venv\Scripts\python.exe report_teams.py --desde 2026-08-01 --persona "Pablo Gil"
+
+# Solo los números, sin pedirle nada al LLM
+.\.venv\Scripts\python.exe report_teams.py --semanal --sin-llm
+```
+
+**Todas las cifras salen de SQL y el LLM solo escribe la lectura en prosa que
+las acompaña**, con prohibición explícita de inventarse ninguna. Si el modelo
+no está disponible, el informe sale igual con sus tablas y una nota diciendo
+por qué falta el análisis: se pierde la lectura, no el dato. Con `--sin-llm`
+ni se intenta, y con `--json` se vuelca solo la parte determinista.
+
+El informe **dice en pantalla lo que no puede saber**, en vez de dar el número
+a secas: que las acciones son el estado de hoy y no el del periodo, que la
+fecha de cierre es la del procesado de la reunión, que los bloqueos se agrupan
+por texto idéntico (uno contado con otras palabras no se detecta) y que sin
+una lista del equipo no se puede saber quién falta y no ha hablado nunca.
+
+Con `--referencia AAAA-MM-DD` los atajos `--semanal`/`--mensual` se calculan
+sobre otro día, que es la forma de sacar el informe de la semana pasada.
+
 ## Uso: todo el pipeline de una vez (`procesar_teams.py`)
 
 Transcribir, resumir e indexar son tres órdenes distintas y, en el servidor
