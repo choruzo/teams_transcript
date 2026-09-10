@@ -291,6 +291,46 @@ transcripciones en castellano la recuperación empeora mucho sin dar ningún
 error. Si cambias de modelo, hay que reconstruir el índice —el CLI se niega a
 mezclar vectores de dos modelos, que es un fallo silencioso—.
 
+## Uso: todo el pipeline de una vez (`procesar_teams.py`)
+
+Transcribir, resumir e indexar son tres órdenes distintas y, en el servidor
+con GPU, hay que intercalar una cuarta cosa: **parar el `llama-server` antes
+de que Whisper pida la VRAM y volver a arrancarlo después**, porque los dos no
+caben a la vez. `procesar_teams.py` hace esa secuencia entera:
+
+```bash
+python procesar_teams.py grabaciones/20260907_090437_mixed.wav \
+    --modelo-whisper large-v3 --diarize --tipo daily \
+    --servicio llama-qwen3-8.service
+```
+
+Lo que ocurre, en orden:
+
+1. `systemctl stop llama-qwen3-8.service` — libera la GPU.
+2. `transcribe_teams.py` — `.txt` y `.srt`, con diarización si se pide.
+3. `systemctl start llama-qwen3-8.service` — **también si el paso 2 falla**,
+   para no dejar el chat de la web caído.
+4. Espera `--espera` segundos (60 por defecto) y después sondea `GET /models`
+   hasta `--espera-max` (300 s), porque `systemctl start` vuelve antes de que
+   el modelo haya terminado de cargar.
+5. `summarize_teams.py --sin-indice` — el `_resumen.md` y el histórico.
+6. `indexar_teams.py --reunion <uid>` — la vectorización de esa reunión.
+
+Detalles útiles:
+
+- **`--simular`** enseña los comandos y las pausas sin ejecutar nada. Es la
+  forma de comprobar la configuración antes de gastar una GPU.
+- Si un paso falla, se para ahí y sale con su mismo código. Se reanuda con
+  **`--desde resumir`** o **`--desde indexar`**, sin repetir lo ya hecho.
+- Pasarle un **`.txt`** en vez de un `.wav` equivale a `--desde resumir`.
+- Los servicios se indican con `--servicio` (repetible) o con la variable
+  **`TEAMS_SERVICIOS_LLM`**. Sin ninguno no se toca systemd: en Windows, donde
+  no hay nada que parar, la espera es una pausa a secas (`--espera 0` la
+  quita). `systemctl` se llama con `sudo -n`, o sin sudo con `--sin-sudo`.
+- Acepta los flags de los tres scripts (`--diarize`, `--num-speakers`,
+  `--tipo`, `--attendees`, `--arrastres`, `--glosario`...); `python
+  procesar_teams.py --help` los lista.
+
 ## Notas técnicas
 
 - La captura del audio del sistema solo produce datos mientras el motor de
