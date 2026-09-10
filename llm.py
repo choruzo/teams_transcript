@@ -20,6 +20,7 @@ enseniar tal cual: "LiteLLM no responde" es informacion, "URLError" no.
 
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -38,11 +39,17 @@ VARIABLE_MODELO = "TEAMS_LLM_MODELO"
 VARIABLE_MODELO_EMBEDDINGS = "TEAMS_EMBED_MODELO"
 VARIABLE_PREFIJO_EMBEDDINGS = "TEAMS_EMBED_PREFIJO"
 VARIABLE_PREFIJO_CONSULTA = "TEAMS_EMBED_PREFIJO_CONSULTA"
+VARIABLE_TIMEOUT_CHAT = "TEAMS_LLM_TIMEOUT"
+VARIABLE_TIMEOUT_EMBEDDINGS = "TEAMS_EMBED_TIMEOUT"
 
-# Generar un resumen largo con un modelo local puede pasar de los cinco
-# minutos; embeber un lote, no. Dos topes distintos porque un embebido colgado
-# diez minutos es un fallo que conviene ver pronto.
-TIMEOUT_CHAT = 600
+# Generar un resumen largo con un modelo local puede pasar de la media hora
+# --medido: una daily de 44 KB con arrastres se comio los 600 s que habia
+# aqui antes-- y el tope tiene que cubrir el caso peor de la maquina mas lenta,
+# no el habitual: pasarse solo cuesta esperar, quedarse corto tira una
+# generacion entera ya pagada. Embeber un lote, no: un embebido colgado dos
+# minutos es un fallo que conviene ver pronto. Por eso son dos topes, y los
+# dos se pueden subir por entorno sin tocar el codigo (ver `timeout_chat`).
+TIMEOUT_CHAT = 1800
 TIMEOUT_EMBEDDINGS = 120
 
 # Cuantos textos por peticion. Suficiente para que el servidor amortice la
@@ -71,6 +78,42 @@ class ErrorLLM(RuntimeError):
 def base_url(explicita: str | None = None) -> str:
     """Orden: argumento > LITELLM_BASE_URL > localhost:4000."""
     return explicita or os.environ.get(VARIABLE_BASE_URL) or DEFAULT_BASE_URL
+
+
+def timeout_chat(explicito: int | None = None) -> int:
+    """Orden: argumento > TEAMS_LLM_TIMEOUT > TIMEOUT_CHAT, en segundos.
+
+    Se resuelve en cada llamada, no al importar, porque un valor por defecto
+    en la firma se congela al definir la funcion y dejaria la variable de
+    entorno sin efecto para quien importe el modulo.
+    """
+    return _segundos(explicito, VARIABLE_TIMEOUT_CHAT, TIMEOUT_CHAT)
+
+
+def timeout_embeddings(explicito: int | None = None) -> int:
+    """Igual que `timeout_chat`, con TEAMS_EMBED_TIMEOUT."""
+    return _segundos(explicito, VARIABLE_TIMEOUT_EMBEDDINGS, TIMEOUT_EMBEDDINGS)
+
+
+def _segundos(explicito: int | None, variable: str, defecto: int) -> int:
+    """Un entorno con basura no debe tumbar el pipeline: se ignora y se avisa."""
+    if explicito is not None:
+        return explicito
+    crudo = os.environ.get(variable)
+    if not crudo:
+        return defecto
+    try:
+        valor = int(crudo)
+    except ValueError:
+        valor = 0
+    if valor <= 0:
+        print(
+            f"Aviso: {variable}='{crudo}' no es un numero de segundos valido; "
+            f"se usa {defecto}.",
+            file=sys.stderr,
+        )
+        return defecto
+    return valor
 
 
 def base_url_embeddings(explicita: str | None = None) -> str:
@@ -182,10 +225,11 @@ def chat(
     model: str,
     messages: list[dict],
     temperature: float = 0.3,
-    timeout: int = TIMEOUT_CHAT,
+    timeout: int | None = None,
     sin_razonamiento: bool = False,
 ) -> str:
     """Una respuesta completa. Es la llamada que usa el pipeline de resumen."""
+    timeout = timeout_chat(timeout)
     payload = {"model": model, "messages": messages, "temperature": temperature}
     if sin_razonamiento:
         payload[CLAVE_SIN_RAZONAMIENTO] = "none"
@@ -215,7 +259,7 @@ def chat_stream(
     model: str,
     messages: list[dict],
     temperature: float = 0.3,
-    timeout: int = TIMEOUT_CHAT,
+    timeout: int | None = None,
 ) -> Iterator[str]:
     """La misma respuesta, trozo a trozo.
 
@@ -224,6 +268,7 @@ def chat_stream(
     respuesta por eso seria absurdo. El fallback tambien cubre al modelo que
     acepta `stream` y devuelve un unico trozo con todo.
     """
+    timeout = timeout_chat(timeout)
     payload = {
         "model": model,
         "messages": messages,
@@ -300,7 +345,7 @@ def embeddings(
     textos: list[str],
     prefijo: str | None = None,
     lote: int = LOTE_EMBEDDINGS,
-    timeout: int = TIMEOUT_EMBEDDINGS,
+    timeout: int | None = None,
 ) -> list[list[float]]:
     """Vectores de una lista de textos, en el mismo orden.
 
@@ -309,6 +354,7 @@ def embeddings(
     """
     if not textos:
         return []
+    timeout = timeout_embeddings(timeout)
     url = f"{base.rstrip('/')}/embeddings"
     vectores: list[list[float]] = []
     for inicio in range(0, len(textos), lote):
