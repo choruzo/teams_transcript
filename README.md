@@ -113,7 +113,54 @@ y añade una etiqueta `[SPEAKER_00]`, `[SPEAKER_01]`, etc. a cada línea del
 La diarización es un paso adicional sobre el audio completo y en CPU puede
 tardar tanto o más que la propia transcripción; en GPU (`--device cuda`) es
 mucho más rápida. Las etiquetas (`SPEAKER_00`, ...) son genéricas: pyannote
-no conoce los nombres reales, solo distingue voces distintas.
+no conoce los nombres reales, solo distingue voces distintas — para eso están
+los perfiles de voz.
+
+## Uso: poner nombre a los hablantes (perfiles de voz)
+
+> **Aviso**: un perfil de voz es un **dato biométrico** a efectos del RGPD. El
+> consentimiento para grabar una reunión **no** cubre automáticamente crear un
+> perfil de voz reutilizable de alguien. Pide permiso antes de dar de alta a
+> nadie; `python perfiles_voz.py --olvidar "Nombre"` borra el suyo.
+
+Con los perfiles guardados, la diarización etiqueta `[Pablo Gil]` en vez de
+`[SPEAKER_03]`, y usa **el mismo nombre para la misma persona en reuniones
+distintas**. No hace falta ningún modelo ni dependencia adicional: los
+embeddings de voz los produce el mismo pipeline de pyannote que ya diariza.
+
+1. Da de alta al equipo una vez, con `--enroll` (único paso interactivo de
+   todo el pipeline: lista cada hablante con su tiempo de habla y una frase
+   suya, y pide el nombre):
+
+   ```powershell
+   .\.venv\Scripts\python.exe transcribe_teams.py archivo.wav --diarize --enroll
+   ```
+
+2. A partir de ahí, las transcripciones siguientes los reconocen solas. Cada
+   reunión afina el centroide de cada persona (media incremental).
+
+   ```powershell
+   # Ver quién tiene perfil
+   python perfiles_voz.py --listar
+
+   # Calibrar el umbral sin aplicar nada: enseña las similitudes calculadas
+   .\.venv\Scripts\python.exe transcribe_teams.py archivo.wav --diarize --dry-run-voz
+
+   # Otro umbral, otro fichero de perfiles, o desactivarlo del todo
+   .\.venv\Scripts\python.exe transcribe_teams.py archivo.wav --diarize --umbral-voz 0.75
+   .\.venv\Scripts\python.exe transcribe_teams.py archivo.wav --diarize --perfiles otro.json
+   .\.venv\Scripts\python.exe transcribe_teams.py archivo.wav --diarize --sin-perfiles
+   ```
+
+Un hablante que no llegue al umbral se queda como `SPEAKER_XX` y lo resuelve
+el LLM por contexto, como antes. El umbral por defecto (**0,70**) está medido
+sobre dos reuniones reales: la misma persona en reuniones distintas da entre
+0,73 y 0,97, y personas distintas no pasan de 0,64. Si cambias de modelo de
+embeddings, recalíbralo con `--dry-run-voz`.
+
+Los perfiles viven en `datos/perfiles_voz.json` (configurable con `--perfiles`
+o `TEAMS_PERFILES_VOZ`), que **no se versiona**, igual que el resto de
+`datos/`.
 
 ## Uso: resumir con un LLM local (LiteLLM)
 

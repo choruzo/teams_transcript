@@ -46,6 +46,16 @@ class TestComandos(unittest.TestCase):
         for ausente in ("--diarize", "--device", "--hf-token", "--sin-glosario"):
             self.assertNotIn(ausente, cmd)
 
+    def test_transcribir_propaga_los_flags_de_voz(self):
+        # --enroll y --dry-run-voz NO se propagan: uno es interactivo y el
+        # otro sirve para calibrar a mano; este script es el desatendido.
+        args = _args(diarize=True, umbral_voz=0.72, sin_aprender=True)
+        cmd = pt.comando_transcribir(args, Path("a/x_mixed.wav"))
+        self.assertEqual(cmd[cmd.index("--umbral-voz") + 1], "0.72")
+        self.assertIn("--sin-aprender", cmd)
+        for ausente in ("--enroll", "--dry-run-voz", "--sin-perfiles"):
+            self.assertNotIn(ausente, cmd)
+
     def test_resumir_siempre_desactiva_el_indice(self):
         # El indexado es un paso propio del orquestador: si `summarize` lo
         # hiciera tambien, se indexaria dos veces y un fallo suyo quedaria

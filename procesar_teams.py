@@ -122,6 +122,17 @@ def comando_transcribir(args, audio: Path) -> list[str]:
         cmd += ["--glosario", args.glosario]
     if args.sin_glosario:
         cmd.append("--sin-glosario")
+    # Perfiles de voz (Fase 3). --enroll y --dry-run-voz no se propagan a
+    # proposito: uno es interactivo y el otro sirve para calibrar a mano, y
+    # este script es el camino desatendido.
+    if args.perfiles:
+        cmd += ["--perfiles", args.perfiles]
+    if args.sin_perfiles:
+        cmd.append("--sin-perfiles")
+    if args.umbral_voz is not None:
+        cmd += ["--umbral-voz", str(args.umbral_voz)]
+    if args.sin_aprender:
+        cmd.append("--sin-aprender")
     return cmd
 
 
@@ -390,6 +401,10 @@ def construir_parser() -> argparse.ArgumentParser:
     grupo.add_argument("--diarize", action="store_true")
     grupo.add_argument("--hf-token", default=None)
     grupo.add_argument("--num-speakers", type=int, default=None)
+    grupo.add_argument("--perfiles", default=None, help="Ruta al fichero de perfiles de voz")
+    grupo.add_argument("--sin-perfiles", action="store_true")
+    grupo.add_argument("--umbral-voz", type=float, default=None)
+    grupo.add_argument("--sin-aprender", action="store_true")
 
     grupo = parser.add_argument_group("resumen")
     grupo.add_argument("--tipo", default="daily", help="Tipo de reunion (por defecto: daily)")

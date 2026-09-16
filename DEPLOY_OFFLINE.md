@@ -172,6 +172,26 @@ Si el servidor SÍ tuviera acceso a `huggingface.co`, la alternativa más
 simple es no copiar nada y pasar `--hf-token`/`HF_TOKEN` como en Windows,
 dejando que descargue los modelos directamente ahí.
 
+### d) Perfiles de voz (`--enroll`): nada nuevo que copiar
+
+Poner nombres reales a los hablantes (Fase 3 de `PLAN_MEJORAS.md`) **no
+necesita ningún modelo ni dependencia adicional en el bundle**: los embeddings
+de voz los devuelve el mismo pipeline de diarización, con el
+`wespeaker-voxceleb-resnet34-LM` que ya está entre los cuatro modelos
+copiados. Con la caché en su sitio y `HF_HUB_OFFLINE=1`:
+
+```bash
+# Alta del equipo (interactivo: pide el nombre de cada hablante detectado)
+python transcribe_teams.py mixed.wav --diarize --device cuda --enroll
+
+# A partir de ahí, se reconocen solos
+python transcribe_teams.py otra.wav --diarize --device cuda
+```
+
+Los perfiles se guardan en `datos/perfiles_voz.json` (o donde diga
+`TEAMS_PERFILES_VOZ`), que vive en el servidor junto a `meetings.db` y al
+glosario, y **no se versiona**: son datos biométricos.
+
 ---
 
 ## 6. Índice semántico del chat (`sqlite-vec` + bge-m3) sin internet
