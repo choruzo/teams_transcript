@@ -1,7 +1,9 @@
 # Plan de interfaz: de "scripts" a "memoria del equipo consultable"
 
 Redactado el 2026-09-08. **Fases D0, I0 e I1 implementadas** (2026-09-08) e
-**I2, I3, I4 e I5** (2026-09-09); el resto es propuesta.
+**I2, I3, I4 e I5** (2026-09-09); el resto es propuesta. El 2026-09-16 I6 se
+parte en **I6a** (editar acciones desde el timeline) e **I6b** (hablantes,
+personas y glosario), y se añade **I11** (sugerencias de duplicados).
 
 Documento complementario de [`PLAN_MEJORAS.md`](PLAN_MEJORAS.md). Aquel define
 el *motor* (glosario, JSON estructurado, SQLite, arrastres, consulta en
@@ -22,6 +24,18 @@ lenguaje natural). Este define la *cara*: una aplicación web local que consuma
 | Primer paso | **D0**, la deuda del motor, antes de escribir una línea de web | `uid` estable, rutas de audio, conexión de solo lectura y WAL en `memoria.py` |
 | Despliegue en el servidor cerrado | **La imagen se construye y prueba en el portátil y se exporta con `docker save`**; en el servidor solo `docker load` | Nada de `build:` en el `docker-compose.yml`, tag versionado, `pull_policy: never`, imagen base por digest y versiones exactas (sección 5) |
 | Qué va dentro de la imagen | **Solo Python y las dependencias.** El código de la aplicación va por *bind mount* | Cambiar el front cuesta un `scp` de kilobytes, no reexportar 200 MB. La imagen solo se rehace si cambia `requirements-api.txt` |
+
+**Decisiones del 2026-09-16** (corrección de acciones, sección 3.6 bis):
+
+| Cuestión | Decisión | Consecuencia en el plan |
+|---|---|---|
+| Correcciones frente al reproceso | **Reconciliar y conservar**, no `overrides` reaplicada | Sustituye a la fila «tabla `overrides`» de arriba para las acciones. El motor (Fase 7 de `PLAN_MEJORAS.md`) empareja antes de borrar; la API no reaplica nada |
+| «Eliminar» una acción | **Descartar, reversible** | Botón *Descartar* con motivo y *Restaurar*; nada de `DELETE` |
+| Relaciones | **Duplicada (fusión)** y **depende de** | Dos acciones de la ficha, cada una con su deshacer |
+| Campos editables | **Descripción, responsable y estado** | Sin alta manual de acciones |
+| Dónde se edita | **Panel lateral** al pulsar la acción en el timeline | El mismo panel se reutiliza en el tablero y en la vista de reunión |
+| Sugerencias de duplicados | **Sí, en una fase posterior** (I11) | I6a es solo manual |
+| Dependencias para el LLM | **Sí, como contexto** en los arrastres | Lo implementa el motor; la interfaz no interviene |
 
 ## 1. Objetivo
 
@@ -304,6 +318,97 @@ venga de la web o de la línea de comandos. Consecuencias:
 **Es el punto más delicado de todo el plan** y debe estar resuelto antes de
 escribir el primer endpoint de escritura.
 
+> **Actualización 2026-09-16.** Para las **acciones**, la tabla `overrides`
+> se sustituye por la reconciliación de la Fase 7 del motor: el reproceso
+> empareja las acciones antes de borrarlas y conserva `id`, `uid`, vínculos y
+> campos corregidos. La razón completa está en `PLAN_MEJORAS.md`; la corta es
+> que reaplicar exige encontrar la acción por el texto que el modelo acaba de
+> reescribir, y que una fusión o una dependencia desaparecen con la cascada
+> antes de poder reaplicarse. Los hablantes, las personas y el glosario (I6b)
+> siguen pendientes de decidir.
+
+### 3.6 bis Editar acciones desde el timeline (I6a)
+
+El punto de entrada es la lista de carriles de la página principal: al
+pulsar una acción —en su etiqueta o en su barra— se abre un **panel lateral**
+con su ficha. El timeline sigue visible detrás, y eso importa: la mitad de
+las correcciones se deciden viendo la acción de al lado («esta y la de abajo
+son la misma»).
+
+**Hoy** pulsar un carril lleva a la última reunión que lo mencionó
+(`alFijar(carril.ultima_uid)`). Ese enlace pasa a ser un botón dentro del
+panel; el clic abre la ficha.
+
+**Contenido del panel** (`web/js/vistas/panel_accion.js`, importado por
+`index.html`, `acciones.html` y `reunion.html`, igual que la tarjeta de
+`vistas/acciones.js`: dos copias del formulario acabarían editando cosas
+distintas):
+
+1. **Cabecera**: descripción, responsable, estado, insignias (`ESTANCADA`,
+   `corregida a mano`, `revisar`) y enlaces a la reunión de origen y a la
+   última.
+2. **Edición**: descripción (textarea), responsable (lista de personas con
+   búsqueda y opción de crear) y estado. Un único botón *Guardar*; los
+   cambios no se aplican al escribir. Si se cierra con cambios sin guardar,
+   se pregunta.
+3. **Descartar**: pide un motivo corto (opcional pero sugerido: «no es una
+   tarea», «duplicada de algo fuera del sistema»…) y confirma. Una acción
+   descartada se sigue pudiendo abrir, con *Restaurar* en lugar de
+   *Descartar*.
+4. **Es la misma que…**: un buscador de acciones vigentes (reutiliza el
+   filtro de texto del tablero, con los acentos ignorados) que muestra
+   candidatas con responsable y fecha. Al elegir una se pregunta **cuál
+   queda como principal**, con la más antigua preseleccionada, y se enseña
+   el resultado antes de confirmar: origen, última mención y menciones de la
+   fusionada.
+5. **Depende de…**: el mismo buscador. Se listan las dependencias en los dos
+   sentidos («depende de», «bloquea a») con un botón para quitar cada una.
+   Un ciclo lo rechaza el motor y el panel enseña su mensaje.
+6. **Menciones**: cada reunión que la tocó, con fecha, estado y comentario
+   (D10 resuelta en la Fase 7).
+7. **Historial**: las filas de `correcciones`, las más recientes arriba. Es
+   lo que permite contestar «¿esto lo dijo el modelo o lo cambió alguien?».
+
+**Cambios en los carriles** (`web/js/vistas/timeline.js`):
+
+- **Las marcas intermedias, por fin.** Con `action_mentions` cada mención es
+  un punto en su reunión, y el `×n` deja de ser la única pista. Es lo que la
+  sección 3.1 pedía desde el principio.
+- Las descartadas y las absorbidas **no se dibujan**. Un conmutador «ver
+  descartadas» en la cabecera, reflejado en la URL (`?descartadas=1`) como
+  el resto de filtros, las pinta atenuadas y tachadas.
+- Una principal que ha absorbido otras lleva un indicador discreto
+  (`×3 · 2 fusionadas`) y su tramo abarca el de todas.
+- **Dependencias**: al pasar el ratón o enfocar un carril se resaltan los
+  carriles de los que depende y los que bloquea. No se dibujan flechas
+  permanentes: con cien carriles son una maraña ilegible, y el dato completo
+  está en el panel.
+- Las que tienen `revisar = 1` llevan una marca de aviso: el modelo ya no
+  las encontró al reprocesar su reunión.
+- Tras guardar, se vuelve a pedir `/api/timeline` y se repinta, sin
+  recargar la página ni perder el filtro ni el desplazamiento de la lista.
+
+**Modo de solo lectura.** Con `TEAMS_API_SOLO_LECTURA` activo, que sigue
+siendo el valor por defecto, el panel se abre igual —la ficha, las menciones
+y el historial son útiles por sí mismos— pero con los controles desactivados
+y una línea que explica qué variable hay que cambiar. `/api/salud` devuelve
+`escritura: true|false` para que la página lo sepa sin intentar un `PATCH`.
+
+**Accesibilidad y teclado.** El carril ya es `role="button"` con `tabindex`;
+`Enter` abre el panel, `Esc` lo cierra y devuelve el foco al carril. El panel
+es un `<aside>` con `aria-labelledby`, no un modal: no atrapa el foco, porque
+el timeline de detrás sigue siendo usable.
+
+**Estilo.** Colores desde `web/css/tokens.css` y nada más (`web/ESTILO.md`).
+*Descartar* usa el token de peligro y es el único botón rojo del panel.
+
+**Lo que la interfaz dice en pantalla:**
+
+- El `.md` que se generó al procesar la reunión **no se actualiza** con las
+  correcciones; la descarga desde la web sí, porque se regenera desde la
+  base.
+- Una acción fusionada suma las reuniones de las dos, no sus contadores.
+
 ### 3.7 Constelación 3D (opcional, Three.js)
 
 Grafo de fuerzas en tres dimensiones: personas, temas/áreas y acciones como
@@ -380,6 +485,36 @@ Contrato REST, JSON, prefijo `/api`. Todos los endpoints de lectura aceptan
 | POST | `/api/chat` | SSE; delega en `ask_teams.py` |
 | GET | `/api/informes?desde=&hasta=` | Markdown de `report_teams.py` |
 | GET | `/api/salud` | estado de la BD, de LiteLLM y versión del esquema |
+
+**Escritura de acciones (I6a, 2026-09-16).** Sustituye a las dos filas de
+acciones de la tabla anterior. Direccionamiento por `uid` de la acción,
+nunca por `id`, por el mismo motivo que las reuniones:
+
+| Método | Ruta | Hace |
+|---|---|---|
+| GET | `/api/acciones/{uid}` | ficha completa: menciones, dependencias, absorbidas, historial |
+| PATCH | `/api/acciones/{uid}` | `descripcion`, `persona`, `estado` (solo los enviados) |
+| POST | `/api/acciones/{uid}/descartar` | cuerpo `{motivo}` |
+| POST | `/api/acciones/{uid}/restaurar` | |
+| POST | `/api/acciones/{uid}/fusionar` | cuerpo `{duplicada_uid}`; `{uid}` es la principal |
+| POST | `/api/acciones/{uid}/separar` | deshace la fusión de esa duplicada |
+| PUT / DELETE | `/api/acciones/{uid}/dependencias/{otra_uid}` | añade o quita «`uid` depende de `otra_uid`» |
+| GET | `/api/personas` | para el selector de responsable |
+
+- **Una conexión de escritura aparte** (`deps.conexion_escritura`), sin
+  `query_only`, con `busy_timeout` para convivir con `summarize_teams.py`,
+  y una transacción por petición. Las rutas de lectura siguen con la de
+  solo lectura. Con `TEAMS_API_SOLO_LECTURA` activo todas estas rutas
+  responden **403 con la explicación**, no 405 ni 500.
+- **Concurrencia optimista**: cada escritura lleva la `version` que vio el
+  panel (una columna o la huella de la fila) y responde **409** si la
+  acción ha cambiado entretanto —otra pestaña o el pipeline reprocesando—.
+  El panel recarga la ficha y lo dice; no se pisa en silencio.
+- **Copia de seguridad antes de la primera escritura del día**
+  (`VACUUM INTO datos/copias/meetings-AAAAMMDD.db`, conservando N días). Lo
+  anunciaba la sección 6; con I6a deja de ser opcional.
+- Errores de validación del motor (ciclo, fusión de una ya absorbida,
+  estado desconocido) → **422 con el mensaje del motor**.
 
 Detalles no negociables:
 
@@ -562,9 +697,10 @@ después estarán en un puerto HTTP.
 Las ocho cuestiones de partida están resueltas en la sección 0. Quedan
 pendientes de decidir, y ninguna bloquea el arranque:
 
-1. **Clave estable de una acción** para la tabla `overrides` (sección 3.6). El
-   `uid` resuelve la identidad de una reunión; el de una acción hay que
-   definirlo. Se decide al implementar I6, con datos reales delante.
+1. ~~**Clave estable de una acción** para la tabla `overrides`~~ **decidida
+   (2026-09-16)**: `actions.uid` asignado una vez y conservado por la
+   reconciliación del reproceso (Fase 7 del motor). Queda por **medir** el
+   umbral de emparejamiento con `--dry-run-reconciliacion`.
 2. **Retención y `--olvidar <persona>`**: sigue abierta desde la sección 6 del
    plan del motor. Con una interfaz, ese borrado debería tener botón.
 3. **Formato de las tarjetas del tablero** (3.4): columnas tipo kanban o tabla
@@ -583,12 +719,19 @@ pendientes de decidir, y ninguna bloquea el arranque:
 | ~~4~~ | ~~**I3 — Tablero de acciones**~~ **hecha** | 3.4 en solo lectura, con badge de estancamiento | Bajo | I0 |
 | ~~5~~ | ~~**I4 — Búsqueda**~~ **hecha** | FTS5 con resaltado, atajo global de teclado | Bajo | I0 |
 | ~~6~~ | ~~**I5 — Chat**~~ **hecha** | 3.5 con SSE y citas navegables | Medio | **Fase 4 del motor (`ask_teams.py`)** |
-| 7 | **I6 — Corrección humana** | 3.6 completo: tabla `overrides` reaplicada, migración a esquema 2, y sus tests | **Alto** | I2, I3, D0 |
+| 7 | **I6a — Editar acciones desde el timeline** | 3.6 bis: panel lateral, corregir, descartar, fusionar, dependencias, marcas intermedias en los carriles | **Alto** | I1, I3, **Fase 7 del motor** |
+| 7 bis | **I6b — Hablantes, personas y glosario** | el resto de 3.6; incluye los responsables compuestos (`Pedro / José Javier`) | Medio | I6a |
 | 8 | **I7 — Audio sincronizado** | reproductor de 3.3 | Bajo | I2 |
 | 9 | **I8 — Informes** | 3.2 ampliado + descarga de Markdown | Bajo | **Fase 5 del motor** |
 | 10 | **I9 — Constelación 3D** | 3.7, si se decide hacerla | Medio | I1 |
 | 11 | **I10a — Re-resumir** | primer nivel de 3.8: relanzar el resumen sobre un `.txt` existente | Bajo | I2, D0 |
 | 12 | **I10b — Subir y transcribir** | segundo nivel de 3.8: cola `jobs`, trabajador systemd en el host, SSE de progreso | **Alto** | I10a |
+| 13 | **I11 — Sugerencias de duplicados** | en el panel, «posible duplicado de…» con *Fusionar* / *No es la misma*; lista de pendientes en el tablero | Bajo | I6a, **Fase 8 del motor** |
+
+**Dependencia crítica de I6a:** igual que I5 con la Fase 4, no se escribe
+un solo endpoint de escritura antes de que la Fase 7 del motor esté hecha y
+probada. Si se hace al revés, la reconciliación acabará en la API y procesar
+por SSH seguirá borrando las correcciones.
 
 **Camino más corto a algo útil:** D0 + I0 + I1 + I2 + I3. Con eso ya se ve el
 histórico completo, las métricas y el estado real de las acciones, que es el
@@ -624,8 +767,16 @@ duplicándola.
   con acentos indiferentes, y enlaza a su reunión.
 - **I5**: una pregunta sobre el histórico se responde en streaming, con citas
   que enlazan al segmento exacto, y responde "no consta" cuando no lo sabe.
-- **I6**: corregir un hablante y cerrar una acción a mano; **reprocesar esa
-  misma reunión y comprobar que ambas correcciones siguen ahí**.
+- **I6a**: desde el timeline, sobre la base real: corregir el responsable
+  de una acción de `equipo`, descartar otra, fusionar #12 y #14 (ULS) y
+  marcar #25 como dependiente de #16 (GCS4-1). **Reprocesar las dos dailys y
+  comprobar que las cuatro cosas siguen ahí**, que el carril fusionado abarca
+  las reuniones de las dos, que la descartada no cuenta en las métricas ni
+  se ofrece en los arrastres, y que con `TEAMS_API_SOLO_LECTURA=1` el panel
+  se abre pero no deja guardar.
+- **I6b**: corregir un hablante y reprocesar la reunión sin perderlo.
+- **I11**: una pareja duplicada real aparece sugerida; rechazarla hace que
+  no vuelva a proponerse ni tras reconstruir el índice.
 - **I7**: hacer clic en una frase de la transcripción reproduce ese instante
   del audio.
 - **I10b**: subir un `.wav` desde el navegador produce, sin tocar la consola,
@@ -1173,7 +1324,7 @@ parchearlos en la API.
 | D7 | **No hay roster del equipo** | `personas` se puebla sola desde el LLM; `personas.activo` no lo usa nadie | "personas sin actualización" |
 | D8 | **`updates.bloqueos` es texto libre** | detectar recurrencia exige el LLM, y deja de ser un número determinista | "bloqueos recurrentes" |
 | D9 | **`duracion_seg` es NULL sin `.srt`** | sale del último `fin` de los segmentos | minutos/semana |
-| D10 | **No hay historial de menciones de una acción** | `actions` guarda el contador `menciones` y `meeting_id_ultima`, no qué reuniones la tocaron | las marcas intermedias del carril (3.1) |
+| D10 | **No hay historial de menciones de una acción** — **planificada** en la Fase 7 del motor (`action_mentions`), que la fusión necesita | `actions` guarda el contador `menciones` y `meeting_id_ultima`, no qué reuniones la tocaron | las marcas intermedias del carril (3.1) |
 
 **D1 era el más importante y el menos evidente** (ya resuelto, ver 9 bis). Toda
 la interfaz cuelga de la URL de una reunión: enlaces guardados, vistas

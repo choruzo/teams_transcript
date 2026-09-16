@@ -1,8 +1,9 @@
 # Plan de mejoras: de "transcriptor" a "memoria del equipo"
 
-Redactado el 2026-09-07. **Fases 0, 1, 2, 4 y 5 implementadas** (las fases 1 y
-2 el 2026-09-08; la 4 y la 5 después); quedan la 3 (perfiles de voz) y la 6
-(map-reduce).
+Redactado el 2026-09-07. **Fases 0, 1, 2, 3, 4 y 5 implementadas** (las fases
+1 y 2 el 2026-09-08; la 4 y la 5 después; la 3 el 2026-09-10); queda la 6
+(map-reduce). **Fases 7 y 8** (corrección humana de acciones y sugerencias de
+duplicados) añadidas como propuesta el 2026-09-16.
 
 Este documento cubre el **motor** (glosario, JSON estructurado, SQLite,
 arrastres, consulta y perfiles de voz). La **interfaz web** que lo consume
@@ -440,7 +441,7 @@ de las reuniones posteriores a la última mención (`memoria.acciones_sin_mencio
 
 ---
 
-## Fase 3 — Perfiles de voz persistentes
+## Fase 3 — Perfiles de voz persistentes — **implementada (2026-09-10)**
 
 **Resuelve:** P1 y P2. **Esfuerzo:** medio-alto. **Riesgo:** el más alto del
 plan — toca `transcribe_teams.py` y el entorno offline con GPU.
@@ -476,6 +477,59 @@ muestre las similitudes calculadas sin aplicarlas.
 **Criterio de aceptación:** tras dar de alta al equipo, una daily nueva
 produce un `.txt` con `[Pablo Gil]` en vez de `[SPEAKER_03]`, y el mismo
 nombre para la misma persona en dos reuniones distintas.
+
+### Resultado (2026-09-10)
+
+Implementada tal cual se planteó, con un módulo nuevo `perfiles_voz.py` (solo
+stdlib) y cinco flags en `transcribe_teams.py`: `--enroll`, `--perfiles`,
+`--umbral-voz`, `--dry-run-voz`, `--sin-perfiles` (y `--sin-aprender`, que no
+estaba en el plan). Verificado en el servidor con GPU sobre dos reuniones
+reales del 7 y el 10 de septiembre.
+
+**Lo que cambió respecto a lo planificado:**
+
+1. **El umbral no es 0,6 sino 0,70.** Es el punto que había que medir y se
+   midió comparando los embeddings de cada hablante entre tramos y días
+   distintos:
+
+   | | similitud coseno |
+   |---|---|
+   | Misma persona, tramos y reuniones distintas | 0,729 – 0,968 (típico ~0,89) |
+   | Personas distintas | 0,05 – 0,52, y **0,638** en un tramo corto |
+
+   Con 0,6, ese 0,638 habría puesto el nombre de otra persona en la
+   transcripción sin avisar de nada.
+
+2. **`return_embeddings=True` ya no existe en pyannote 4.x**, que es la
+   versión del servidor (4.0.7). Los embeddings vienen siempre en
+   `DiarizeOutput.speaker_embeddings`, ordenados como `annotation.labels()`;
+   pasar el argumento solo suelta un *"Ignoring unexpected keyword
+   arguments"*. Se detecta mirando la firma, así que sirven las dos versiones.
+   Confirmado lo importante del plan: **no hace falta ninguna dependencia ni
+   modelo nuevo**, los 256 valores por hablante salen del pipeline que ya
+   diariza.
+
+3. **Mínimo de habla para aprender (`MINIMO_SEGUNDOS_MUESTRA`, 15 s).** Los
+   dos extremos de la calibración —el peor acierto (0,729) y el peor fallo
+   (0,638)— eran de hablantes con menos de 20 s. Identificar con una muestra
+   así se permite, porque solo afecta a esa reunión; crear o actualizar un
+   centroide con ella no, porque el error queda guardado para siempre.
+
+4. **La asignación es exclusiva**: dos hablantes distintos de la misma
+   reunión no pueden resolverse como la misma persona.
+
+**Prueba de aceptación (servidor, GPU, Whisper small):** dado de alta el
+equipo sobre un tramo de la daily del 7-sep, un tramo de la del 10-sep
+reconoció por su nombre a 3 de los 4 hablantes (0,802 / 0,840 / 0,899) y dejó
+como `SPEAKER_02` al cuarto, que no tenía perfil (mejor candidato 0,465). Es
+exactamente la degradación buscada: quien no se reconoce se queda con la
+etiqueta genérica y lo resuelve el LLM por contexto.
+
+**Privacidad:** los perfiles son datos biométricos. `datos/perfiles_voz.json`
+no se versiona, `--enroll` lo advierte en pantalla antes de preguntar nombres
+y `python perfiles_voz.py --olvidar "Nombre"` borra el de una persona (la
+utilidad `--olvidar` que la sección 6 recomendaba, de momento solo para el
+perfil de voz; anonimizar sus filas del histórico sigue pendiente).
 
 ---
 
@@ -592,6 +646,264 @@ reuniones juntas no caben en la ventana del modelo local. Se necesita:
 
 ---
 
+## Fase 7 — Corrección humana de acciones (esquema 3) — propuesta (2026-09-16)
+
+**Resuelve:** el LLM crea acciones duplicadas, mal redactadas, asignadas a
+quien no es o que directamente no son tareas, y hoy no hay forma de
+arreglarlo sin SQL a mano. **Esfuerzo:** alto. **Riesgo:** alto: toca
+`crear_reunion`, que es el corazón de la idempotencia del reproceso.
+
+Es la mitad de motor de la fase **I6a** de
+[`PLAN_INTERFAZ.md`](PLAN_INTERFAZ.md) (panel de edición al pulsar una acción
+del timeline). Va aquí y no allí por el mismo principio de siempre: si la
+lógica vive en la API, procesar por SSH seguiría pisando las correcciones.
+
+### Qué se ve en los datos reales
+
+Las dos dailys de la base (7 y 10 de septiembre) ya tienen los tres casos:
+
+- **Emparejadas o duplicadas**: #12 «Seguir estabilizando la versión de ULS»
+  y #14 «Seguir con ULS; avanzar en banda base cuando haya hueco»; #11
+  «Continuar trabajo en banda base» solapa con la segunda mitad de #14.
+- **Dependientes**: #25 «Hablar con Diego tras la entrega de GCS4-1» no
+  puede avanzar hasta #16 «Cerrar GCS4-1».
+- **Mal asignadas**: responsables `equipo` y `Pedro / José Javier`, que
+  `obtener_o_crear_persona` ha dado de alta como si fueran personas.
+
+### Decisiones tomadas (2026-09-16)
+
+| Cuestión | Decisión | Consecuencia |
+|---|---|---|
+| Qué es «eliminar» | **Descartar, reversible.** Nunca `DELETE` | La acción sigue en la base con `descartada_en` y un motivo; no se ve, no cuenta y no se le ofrece al LLM. Si se reprocesa la reunión y el modelo la vuelve a generar, **sigue descartada** |
+| Relaciones | **Duplicada (fusión)** y **depende de**. No hay «relacionada» sin semántica | La fusión cambia lo que se cuenta; la dependencia solo se muestra y se da como contexto al LLM |
+| Campos corregibles | **Descripción, responsable y estado.** Crear acciones a mano queda fuera | Sin acciones «huérfanas» de reunión: toda acción sigue naciendo en una transcripción |
+| Supervivencia al reproceso | **Reconciliar y conservar**, en lugar de la tabla `overrides` reaplicada que proponía el plan de interfaz | `crear_reunion` deja de borrar las acciones: las empareja con lo que devuelve el modelo y conserva `id` y `uid`. Lo que no encuentra pareja y tiene correcciones se marca *pendiente de revisión*, no se pierde |
+| Dependencias y LLM | **Sí, como contexto** en la lista de arrastres | `bloqueada por [16]` junto a la acción; la validación de `normalizar()` no cambia |
+| Sugerencias automáticas de duplicados | **Sí, en una fase posterior** (Fase 8) | Esta fase es solo manual |
+
+**Por qué se abandona `overrides`.** Reaplicar correcciones sobre filas
+recién insertadas obliga a encontrar «la misma acción» con una clave, y la
+única clave posible es el texto que el modelo acaba de reescribir. Con
+`overrides` la corrección se busca **después** de perder la fila; con la
+reconciliación se busca **antes** de decidir si se borra, con la fila
+original delante —su id, sus vínculos, sus correcciones— y la redacción que
+el modelo le dio la primera vez. Además, una fusión o una dependencia no son
+«un campo con otro valor»: son vínculos entre dos filas que la cascada del
+borrado destruiría antes de que nadie pudiera reaplicarlos.
+
+### 7.1 Esquema 3
+
+Migración 2 → 3 en `_migrar`, con las mismas reglas que la 1 → 2 (`ALTER
+TABLE` antes de `_ESQUEMA`, sobre una copia de una base real en los tests):
+
+```sql
+-- actions: columnas nuevas
+uid               TEXT     -- identidad estable, se asigna una vez y no se recalcula
+descripcion_llm   TEXT     -- lo que dijo el modelo; `descripcion` es lo vigente
+descartada_en     TEXT
+motivo_descarte   TEXT
+absorbida_por     INTEGER REFERENCES actions(id)   -- fusión: esta es la duplicada
+revisar           INTEGER NOT NULL DEFAULT 0      -- el reproceso no la encontró
+
+CREATE UNIQUE INDEX idx_actions_uid ON actions(uid);
+
+-- D10, por fin: qué reuniones tocaron cada acción
+CREATE TABLE action_mentions (
+  action_id   INTEGER NOT NULL REFERENCES actions(id) ON DELETE CASCADE,
+  meeting_id  INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  estado      TEXT NOT NULL,
+  comentario  TEXT,
+  PRIMARY KEY (action_id, meeting_id)
+);
+
+CREATE TABLE action_dependencias (
+  action_id       INTEGER NOT NULL REFERENCES actions(id) ON DELETE CASCADE,
+  depende_de_id   INTEGER NOT NULL REFERENCES actions(id) ON DELETE CASCADE,
+  creado_en       TEXT NOT NULL,
+  PRIMARY KEY (action_id, depende_de_id),
+  CHECK (action_id != depende_de_id)
+);
+
+-- Historial de lo que ha hecho un humano. No se reaplica: documenta y protege.
+CREATE TABLE correcciones (
+  id              INTEGER PRIMARY KEY,
+  action_id       INTEGER NOT NULL REFERENCES actions(id) ON DELETE CASCADE,
+  campo           TEXT NOT NULL,   -- descripcion | persona | estado | descarte | fusion | dependencia
+  valor_anterior  TEXT,
+  valor_nuevo     TEXT,
+  origen          TEXT NOT NULL,   -- web | cli
+  creado_en       TEXT NOT NULL,
+  deshecha_en     TEXT
+);
+
+CREATE VIEW acciones_vigentes AS
+  SELECT * FROM actions WHERE descartada_en IS NULL AND absorbida_por IS NULL;
+```
+
+Notas:
+
+- **D10 entra en esta fase porque la fusión lo necesita.** Sumar los
+  contadores `menciones` de dos duplicadas cuenta dos veces cada reunión que
+  las nombró a las dos, y deshacer la fusión sin saber qué menciones eran de
+  quién es imposible. Con `action_mentions`, `menciones` y
+  `meeting_id_ultima` pasan a ser **derivables** (se mantienen como caché
+  por compatibilidad), la fusión es la unión de dos conjuntos y el carril del
+  timeline puede dibujar por fin las marcas intermedias. Resuelve también D4:
+  la fecha del cierre es la de la reunión de la mención que lo cerró.
+- **`descripcion_llm` es la clave del emparejamiento**, no `descripcion`:
+  una descripción corregida a mano nunca se parecerá a lo que el modelo
+  vuelva a generar, y la original sí.
+- **La migración rellena** `uid` (`<uid reunión>-a<n>`), `descripcion_llm`
+  (copia de `descripcion`) y `action_mentions` a partir de lo único que hay:
+  el origen y, si `meeting_id_ultima` es distinta, esa. Las menciones
+  intermedias de las acciones con más de dos se pierden y **se dice** en la
+  salida de `--migrar`; con la base actual no afecta a ninguna.
+- **`acciones_vigentes` es la única entrada de lectura.** Hoy hay 14
+  consultas con `FROM actions` en `memoria.py` (tablero, métricas, carriles,
+  informes, arrastres…). Todas pasan a la vista salvo las que escriben y la
+  ficha de detalle. Un test recorre `memoria.py` y falla si aparece un
+  `FROM actions` nuevo fuera de una lista blanca: una descartada que se
+  cuela en `metricas()` y no en el tablero es exactamente la contradicción
+  que esta herramienta existe para evitar.
+
+### 7.2 Operaciones en `memoria.py`
+
+Todas dentro de una transacción, registran su fila en `correcciones` y
+devuelven la acción resultante. La API solo las llama.
+
+| Función | Qué hace | Reglas |
+|---|---|---|
+| `corregir_accion(uid, descripcion=, persona=, estado=, origen=)` | Cambia los campos indicados | `estado` validado contra `ESTADOS_ACCION`; al cerrar pone `cerrada_en`, al reabrir lo borra. `persona` pasa por `obtener_o_crear_persona` |
+| `descartar_accion(uid, motivo)` / `restaurar_accion(uid)` | Marca o desmarca `descartada_en` | Descartar una acción de la que dependen otras borra esas dependencias (y queda en `correcciones`, para poder restaurarlas) |
+| `fusionar_acciones(principal_uid, duplicada_uid)` | `absorbida_por` + unión de menciones | La principal toma el origen más antiguo; su estado no cambia. No se fusiona en cadena: si la duplicada ya absorbía otras, pasan a la principal. Las dependencias de la duplicada se trasladan |
+| `separar_acciones(duplicada_uid)` | Deshace la fusión | Cada una recupera sus menciones: por eso existe `action_mentions` |
+| `anadir_dependencia(uid, depende_de_uid)` / `quitar_dependencia` | Vínculo dirigido | **Rechaza ciclos** (recorrido en Python sobre la tabla), consigo misma y con descartadas o absorbidas |
+| `detalle_accion(uid)` | Ficha completa | Menciones con fecha y comentario, dependencias en los dos sentidos, absorbidas, historial de `correcciones` |
+
+**Cerrar una acción con dependencias abiertas se permite y se avisa.** La
+realidad manda sobre el grafo: si alguien dice en la daily que ya está, es
+que el vínculo era erróneo o ya no importa. La función devuelve el aviso; no
+bloquea.
+
+### 7.3 Reconciliación al reprocesar
+
+Es lo que sustituye al borrado en cascada de las acciones en `crear_reunion`
+y el punto más delicado de la fase.
+
+1. **La fila de `meetings` ya no se borra**: se actualiza en su sitio y se
+   borran a mano sus hijos regenerables (segmentos, updates, riesgos,
+   hablantes, y las menciones que esa reunión hizo a acciones ajenas). Hoy el
+   `id` se conserva reinsertándolo; con esto se conserva sin trucos, y la
+   cascada deja de llevarse por delante acciones con vínculos.
+2. **`_deshacer_arrastres` pasa a trabajar sobre `action_mentions`**: quitar
+   las menciones de esta reunión y recalcular estado, `menciones` y
+   `meeting_id_ultima` desde las que quedan. Desaparece el «las cerradas
+   vuelven a `abierta`» que hoy se asume porque el estado previo no se
+   guardaba.
+3. **Emparejar las acciones nacidas en la reunión** con las que devuelve el
+   modelo, en este orden y de forma exclusiva (una fila solo empareja una
+   vez, como los perfiles de voz):
+   1. `descripcion_llm` normalizada idéntica (misma normalización que
+      `_huella_bloqueo`).
+   2. Similitud de `difflib.SequenceMatcher` sobre el texto normalizado por
+      encima de `UMBRAL_RECONCILIACION`, con el mismo responsable como
+      desempate. Stdlib, sin embeddings: tiene que funcionar donde no está
+      bge-m3.
+4. **Con pareja**: se conserva la fila (`id`, `uid`, vínculos). Los campos
+   **con corrección vigente** mantienen el valor humano; el resto toma el
+   del modelo. `descripcion_llm` se actualiza a la nueva redacción. Una
+   descartada o absorbida sigue estándolo.
+5. **Sin pareja y protegida** (tiene correcciones, está descartada, absorbe
+   o es absorbida, o participa en una dependencia): se conserva con
+   `revisar = 1`. La interfaz la enseña como «el modelo ya no la detecta en
+   esta reunión» con dos botones: descartar o mantener.
+6. **Sin pareja y sin proteger**: se borra, como hoy.
+7. Las acciones del modelo sin pareja se insertan como nuevas.
+
+**El estado corregido a mano frente a los arrastres.** Una corrección de
+estado es cierta *a partir* del día en que se hizo. Regla: un arrastre de una
+reunión con fecha **anterior o igual** al día de la corrección no la pisa
+(reprocesar la daily del lunes no deshace lo que alguien arregló el
+miércoles); uno de una reunión **posterior** sí la actualiza, porque es
+información nueva. Se registra en `action_mentions` igualmente.
+
+**El umbral es una medición, no una preferencia**, igual que el de voz:
+`summarize_teams.py --dry-run-reconciliacion` reprocesa sin escribir y
+enseña cada pareja con su similitud. Se calibra reprocesando las dailys
+reales con el mismo modelo y con otro (`qwen3.8-27b`), que es el caso en que
+más cambia la redacción.
+
+### 7.4 Arrastres
+
+- `acciones_abiertas` lee de `acciones_vigentes`: las descartadas y las
+  absorbidas no se ofrecen. Si el modelo devuelve igualmente su id, la
+  validación actual ya lo descarta por no estar en la lista.
+- Cada acción ofrecida lleva sus dependencias abiertas:
+  `[25] Pedro — Hablar con Diego tras la entrega (abierta, 1 mención; bloqueada por [16])`.
+  `ARRASTRES_PROMPT` explica en una línea qué significa; no se pide al modelo
+  que cree ni quite dependencias.
+- La descripción ofrecida es la **corregida**, no la del modelo: es la que
+  mejor describe la tarea y la que el equipo reconocerá.
+
+### 7.5 Tests
+
+Contra una base temporal, como el resto:
+
+- Cada operación de 7.2 y su deshacer deja la base igual que antes
+  (comparando filas, como la idempotencia de la Fase 2).
+- **Reprocesar una reunión con una acción corregida, otra descartada, dos
+  fusionadas y una dependencia conserva las cinco cosas.** Es el criterio de
+  aceptación de la fase.
+- Reprocesar con una respuesta del modelo que ya no contiene una acción
+  protegida la deja con `revisar = 1`; una sin proteger desaparece.
+- Una corrección de estado sobrevive al reproceso de una reunión anterior y
+  cede ante una posterior.
+- Ciclos de dependencias rechazados; fusionar una acción ya absorbida
+  rechazado.
+- Ninguna consulta de lectura cuenta descartadas ni absorbidas (el test de
+  `FROM actions` más un caso por función pública).
+- Migración 2 → 3 sobre una copia de la base real.
+
+### 7.6 Fuera de esta fase
+
+- **Responsables compuestos** (`Pedro / José Javier`, `equipo`): son un
+  problema de `personas`, no de acciones. Esta fase permite reasignar, pero
+  no impide que el modelo los vuelva a crear. Va con la gestión de personas y
+  alias (I6b del plan de interfaz).
+- Crear acciones a mano.
+- Riesgos (D3): siguen sin estado y sin corrección.
+
+---
+
+## Fase 8 — Sugerencias de duplicados — propuesta (2026-09-16)
+
+**Resuelve:** que haya que descubrir a ojo las duplicadas entre cientos de
+acciones. **Esfuerzo:** medio. **Riesgo:** bajo: nunca escribe nada sin un
+humano. **Depende de:** Fase 7 y del índice semántico de la Fase 4.
+
+- **Nunca se fusiona sola.** El sistema propone parejas; la decisión es de
+  quien las mira, y pasa por `fusionar_acciones` como cualquier otra.
+- **Embeddings con bge-m3**, el mismo modelo y endpoint del índice. Los
+  vectores de las acciones son derivados y reconstruibles, así que viven en
+  `datos/indice.db` (tabla nueva, `VERSION_TROCEADO` aparte), no en
+  `meetings.db`. Se recalculan en el paso de indexado de `procesar_teams.py`
+  y con `indexar_teams.py --acciones`.
+- **Solo entre vigentes, y con sentido**: parejas de acciones abiertas, o una
+  recién nacida frente a las abiertas. No se proponen dos acciones de la
+  misma reunión con distinto responsable (el LLM ya las separó a propósito).
+- **Los rechazos son una decisión humana y viven en `meetings.db`**
+  (`sugerencias_rechazadas(action_a_uid, action_b_uid, creado_en)`): borrar
+  el índice no puede hacer que vuelvan a proponerse parejas ya descartadas.
+- **Umbral medido, no elegido**: `indexar_teams.py --acciones --dry-run`
+  lista todas las parejas con su similitud. Se calibra con las fusiones que
+  se hayan hecho a mano en la Fase 7, que son la verdad de referencia.
+- **Sin `sqlite-vec` o sin modelo, no hay sugerencias y se dice**; el resto
+  de la corrección funciona igual. Mismo criterio que el chat.
+- `report_teams.py` puede listar las sugerencias pendientes como una sección
+  más, con su advertencia de que son probables, no confirmadas.
+
+---
+
 ## 4. Orden de implementación recomendado
 
 | Orden | Fase | Esfuerzo | Riesgo | Desbloquea |
@@ -601,8 +913,10 @@ reuniones juntas no caben en la ventana del modelo local. Se necesita:
 | ~~3~~ | ~~Fase 2 — Arrastres~~ **hecha** | Bajo | Bajo | El valor de gestión |
 | ~~4~~ | ~~Fase 4 — `ask_teams.py`~~ **hecha** | Medio | Bajo | Consulta del histórico |
 | ~~5~~ | ~~Fase 5 — `report_teams.py`~~ **hecha** | Bajo | Nulo | Informes |
-| 6 | Fase 3 — Perfiles de voz | Medio-alto | **Alto** | Calidad a largo plazo |
-| 7 | Fase 6 — Map-reduce | Medio | Medio | Reuniones largas |
+| ~~6~~ | ~~Fase 3 — Perfiles de voz~~ **hecha** | Medio-alto | **Alto** | Calidad a largo plazo |
+| 7 | Fase 7 — Corrección humana de acciones (esquema 3, D10) | Alto | **Alto** | I6a de la interfaz; Fase 8 |
+| 8 | Fase 8 — Sugerencias de duplicados | Medio | Bajo | I11 de la interfaz |
+| 9 | Fase 6 — Map-reduce | Medio | Medio | Reuniones largas |
 
 La Fase 3 va deliberadamente tarde pese a ser muy valiosa: es la única que
 toca la parte frágil (pyannote, GPU, entorno offline) y conviene abordarla con
