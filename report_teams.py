@@ -440,13 +440,14 @@ def renderizar_markdown(
         for a in acciones["cerradas"]
     ]
     if cuerpo:
-        # D4: `cerrada_en` es la fecha en que se proceso la reunion que la
-        # cerro, no la del cierre real. Decirlo al lado del numero es la unica
-        # forma honesta de darlo.
+        # D4: desde el esquema 3 `cerrada_en` es la fecha de la reunion donde
+        # se dio por cerrada (o el dia de la correccion manual). Sigue sin ser
+        # el dia exacto en que se termino, y se dice al lado del numero.
         cuerpo.append("")
         cuerpo.append(
-            "*La fecha de cierre es la del procesado de la reunion que la "
-            "cerro, no la del cierre real.*"
+            "*La fecha de cierre es la de la reunion en que se dio por cerrada "
+            "(o la del dia en que alguien lo corrigio a mano), no la del "
+            "procesado.*"
         )
     _seccion(lineas, "Cerradas en el periodo", cuerpo, "(ninguna)")
 

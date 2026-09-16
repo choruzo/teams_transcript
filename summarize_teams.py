@@ -187,7 +187,10 @@ ARRASTRES_PROMPT = (
     "identificador: \"acciones\" es solo para compromisos nuevos de esta "
     "reunion.\n"
     "Ojo: que alguien hable del mismo tema no significa que la accion haya "
-    "avanzado. Si no queda claro, deja el estado que ya tenia."
+    "avanzado. Si no queda claro, deja el estado que ya tenia.\n"
+    "Si una accion indica \"bloqueada por [n]\", no puede avanzar hasta que "
+    "se resuelva la accion [n]; es solo contexto, no crees ni quites "
+    "dependencias."
 )
 
 
@@ -267,9 +270,15 @@ def formatear_acciones_abiertas(filas) -> str:
             if fila["ultima_fecha"]
             else ""
         )
+        bloqueos = fila.get("bloqueada_por") if isinstance(fila, dict) else None
+        dependencias = (
+            "; bloqueada por " + ", ".join(f"[{d}]" for d in bloqueos)
+            if bloqueos
+            else ""
+        )
         lineas.append(
             f"  [{fila['id']}] {quien} - {fila['descripcion']} "
-            f"({fila['estado']}, {menciones} {plural}{visto})"
+            f"({fila['estado']}, {menciones} {plural}{visto}{dependencias})"
         )
     return "\n".join(lineas)
 
@@ -786,10 +795,16 @@ def guardar_en_bd(
             datos_json=datos,
         )
         mapa = memoria.registrar_hablantes(conn, meeting_id, datos["hablantes"])
+        # Las acciones antes que los arrastres: si se reprocesa, la
+        # reconciliacion decide que filas de la pasada anterior sobreviven.
+        reconciliacion = memoria.reconciliar_acciones(
+            conn, meeting_id, datos["acciones"]
+        )
         recuentos = {
             "segmentos": memoria.insertar_segmentos(conn, meeting_id, segmentos, mapa),
             "updates": memoria.insertar_updates(conn, meeting_id, datos["por_persona"]),
-            "acciones": memoria.insertar_acciones(conn, meeting_id, datos["acciones"]),
+            "acciones": reconciliacion["conservadas"] + reconciliacion["nuevas"],
+            "reconciliacion": reconciliacion,
             "riesgos": memoria.insertar_riesgos(conn, meeting_id, datos["riesgos"]),
             "arrastres": memoria.aplicar_arrastres(conn, meeting_id, datos["arrastres"]),
         }
@@ -797,6 +812,43 @@ def guardar_en_bd(
     finally:
         conn.close()
     return meeting_id, recuentos
+
+
+def simular_reconciliacion(
+    ruta_db: str | None, transcript_path: Path, datos: dict
+) -> dict:
+    """Lo que haria el reproceso con las acciones de esta reunion, sin escribir."""
+    conn = memoria.conectar(ruta_db)
+    try:
+        previa = memoria.id_reunion_por_transcripcion(
+            conn, str(transcript_path.resolve())
+        )
+        return memoria.simular_reconciliacion(conn, previa, datos["acciones"])
+    finally:
+        conn.close()
+
+
+def imprimir_reconciliacion(informe: dict) -> None:
+    """Salida de `--dry-run-reconciliacion`, pensada para calibrar el umbral."""
+    print(f"\n--- Reconciliacion (umbral {informe['umbral']}) ---")
+    if not informe["parejas"] and not informe["sin_pareja"]:
+        print("La reunion no tenia acciones registradas: todo entraria como nuevo.")
+    for pareja in sorted(informe["parejas"], key=lambda p: p["similitud"]):
+        print(
+            f"  {pareja['similitud']:.3f} {pareja['metodo']:<9} [{pareja['uid']}]\n"
+            f"        guardada: {pareja['guardada']}\n"
+            f"        nueva:    {pareja['nueva']}"
+        )
+    for sola in informe["sin_pareja"]:
+        destino = "quedaria para revisar" if sola["protegida"] else "se borraria"
+        print(f"  SIN PAREJA [{sola['uid']}] ({destino}): {sola['guardada']}")
+        if sola["mejor_candidata"]:
+            print(
+                f"        mejor candidata ({sola['similitud']:.3f}): "
+                f"{sola['mejor_candidata']}"
+            )
+    for nueva in informe["nuevas"]:
+        print(f"  NUEVA: {nueva}")
 
 
 # --------------------------------------------------------------------------
@@ -942,6 +994,13 @@ def main() -> None:
         help="No consultar las acciones abiertas de reuniones anteriores",
     )
     parser.add_argument(
+        "--dry-run-reconciliacion",
+        action="store_true",
+        help="Llama al modelo y ensena como se emparejarian sus acciones con "
+        "las ya guardadas de esta reunion, con su similitud, sin escribir ni "
+        "el .md ni la base. Sirve para calibrar el umbral de reconciliacion",
+    )
+    parser.add_argument(
         "--fecha",
         default=None,
         help="Fecha de la reunion en ISO (por defecto se deduce del nombre del "
@@ -1056,6 +1115,9 @@ def main() -> None:
         sys.exit(2)
 
     datos = normalizar(datos, args.tipo, acciones_previas)
+    if args.dry_run_reconciliacion:
+        imprimir_reconciliacion(simular_reconciliacion(args.db, transcript_path, datos))
+        return
     markdown = renderizar_markdown(datos, args.tipo, fecha, args.titulo)
     output_path.write_text(markdown, encoding="utf-8")
     print(f"\nGuardado: {output_path}")
@@ -1086,6 +1148,13 @@ def main() -> None:
                 f"{recuentos['acciones']} acciones, {recuentos['riesgos']} riesgos, "
                 f"{recuentos['arrastres']} arrastres)"
             )
+            conciliadas = recuentos["reconciliacion"]
+            if conciliadas["conservadas"] or conciliadas["revisar"] or conciliadas["borradas"]:
+                print(
+                    f"Reproceso: {conciliadas['conservadas']} acciones conservadas, "
+                    f"{conciliadas['nuevas']} nuevas, {conciliadas['borradas']} "
+                    f"borradas, {conciliadas['revisar']} pendientes de revisar"
+                )
             if not args.sin_indice:
                 indexar_reunion_en_segundo_plano(args, transcript_path)
 

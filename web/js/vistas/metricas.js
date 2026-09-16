@@ -8,7 +8,8 @@
 //    Mezclarlos sin decirlo produce números que nadie sabe interpretar.
 // 2. **No prometer lo que el dato no soporta.** Los riesgos son "mencionados en
 //    el periodo" y nunca "abiertos" (D3), y los cierres llevan su advertencia
-//    porque `cerrada_en` es la fecha de proceso (D4).
+//    porque `cerrada_en` es la fecha de la reunion que la cerro, no la del
+//    cierre exacto (D4).
 // 3. **Con poco dato, el dato crudo.** Por debajo de MIN_SEMANAS no se dibuja
 //    una serie temporal: tres barras no son una tendencia.
 
@@ -252,7 +253,8 @@ export function dibujarMetricas(contenedor, datos) {
         <h3>Por semana</h3>
         <div id="serie"></div>
         <p class="nota">Los cierres usan <code>cerrada_en</code>, que es la fecha
-          en que se procesó la reunión y no necesariamente la del cierre real.</p>
+          de la reunión en que se dio por cerrada (o la de la corrección manual),
+          no necesariamente la del día en que se terminó.</p>
       </section>
       <section class="panel">
         <h3>Reparto por persona</h3>

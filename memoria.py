@@ -30,7 +30,7 @@ import unicodedata
 from datetime import date
 from pathlib import Path
 
-ESQUEMA_VERSION = 2
+ESQUEMA_VERSION = 3
 
 RUTA_POR_DEFECTO = Path(__file__).resolve().parent / "datos" / "meetings.db"
 VARIABLE_ENTORNO = "TEAMS_DB"
@@ -66,6 +66,17 @@ UMBRAL_ESTANCAMIENTO = 3
 # El LLM razona mejor con etiquetas que con numeros; la BD guarda un valor
 # comparable. Este es el unico punto donde se traduce entre ambos.
 CONFIANZA_A_NUMERO = {"alta": 0.9, "media": 0.6, "baja": 0.3}
+
+# Similitud minima (`difflib.SequenceMatcher` sobre el texto normalizado) para
+# que, al reprocesar una reunion, una accion que devuelve el modelo se considere
+# la misma que una ya guardada (Fase 7). **Es provisional**: igual que el umbral
+# de voz, es una medicion y no una preferencia, y se calibra con
+# `summarize_teams.py --dry-run-reconciliacion` reprocesando dailys reales con
+# el mismo modelo y con otro.
+UMBRAL_RECONCILIACION = 0.75
+
+# Quien hizo una correccion. Solo documenta: las dos valen lo mismo.
+ORIGENES_CORRECCION = ("web", "cli")
 
 _ESQUEMA = """
 CREATE TABLE IF NOT EXISTS meetings (
@@ -117,8 +128,50 @@ CREATE TABLE IF NOT EXISTS actions (
   meeting_id_ultima   INTEGER REFERENCES meetings(id),
   estado              TEXT NOT NULL,
   menciones           INTEGER NOT NULL DEFAULT 1,
-  cerrada_en          TEXT
+  cerrada_en          TEXT,
+  uid                 TEXT,
+  descripcion_llm     TEXT,
+  descartada_en       TEXT,
+  motivo_descarte     TEXT,
+  absorbida_por       INTEGER REFERENCES actions(id),
+  revisar             INTEGER NOT NULL DEFAULT 0
 );
+
+-- Esquema 3 (Fase 7). `menciones`, `meeting_id_ultima`, `estado` y
+-- `cerrada_en` de `actions` pasan a ser una cache de lo que dicen estas
+-- menciones (mas las correcciones de estado); `_recalcular_accion` la rehace.
+CREATE TABLE IF NOT EXISTS action_mentions (
+  action_id   INTEGER NOT NULL REFERENCES actions(id) ON DELETE CASCADE,
+  meeting_id  INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  estado      TEXT NOT NULL,
+  comentario  TEXT,
+  PRIMARY KEY (action_id, meeting_id)
+);
+
+CREATE TABLE IF NOT EXISTS action_dependencias (
+  action_id       INTEGER NOT NULL REFERENCES actions(id) ON DELETE CASCADE,
+  depende_de_id   INTEGER NOT NULL REFERENCES actions(id) ON DELETE CASCADE,
+  creado_en       TEXT NOT NULL,
+  PRIMARY KEY (action_id, depende_de_id),
+  CHECK (action_id != depende_de_id)
+);
+
+-- Historial de lo que ha hecho un humano. No se reaplica: documenta y protege.
+CREATE TABLE IF NOT EXISTS correcciones (
+  id              INTEGER PRIMARY KEY,
+  action_id       INTEGER NOT NULL REFERENCES actions(id) ON DELETE CASCADE,
+  campo           TEXT NOT NULL,
+  valor_anterior  TEXT,
+  valor_nuevo     TEXT,
+  origen          TEXT NOT NULL,
+  creado_en       TEXT NOT NULL,
+  deshecha_en     TEXT
+);
+
+-- La unica entrada de lectura de las acciones: lo descartado y lo fusionado
+-- no se ve, no cuenta y no se le ofrece al LLM.
+CREATE VIEW IF NOT EXISTS acciones_vigentes AS
+  SELECT * FROM actions WHERE descartada_en IS NULL AND absorbida_por IS NULL;
 
 CREATE TABLE IF NOT EXISTS risks (
   id          INTEGER PRIMARY KEY,
@@ -143,6 +196,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_meetings_uid ON meetings(uid);
 CREATE INDEX IF NOT EXISTS idx_segments_meeting ON segments(meeting_id, idx);
 CREATE INDEX IF NOT EXISTS idx_actions_estado ON actions(estado);
 CREATE INDEX IF NOT EXISTS idx_meetings_fecha ON meetings(fecha);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_uid ON actions(uid);
+CREATE INDEX IF NOT EXISTS idx_actions_origen ON actions(meeting_id_origen);
+CREATE INDEX IF NOT EXISTS idx_mentions_meeting ON action_mentions(meeting_id);
+CREATE INDEX IF NOT EXISTS idx_correcciones_accion ON correcciones(action_id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS segments_fts USING fts5(
   texto,
@@ -302,6 +359,110 @@ def _migrar(conn: sqlite3.Connection, desde: int) -> None:
             )
         # El indice UNIQUE lo crea `_ESQUEMA`, justo despues de esto.
 
+    if desde and desde < 3:
+        _migrar_a_3(conn)
+
+
+# Columnas que el esquema 3 anade a `actions`, con su definicion para ALTER.
+_COLUMNAS_ACCIONES_V3 = (
+    ("uid", "TEXT"),
+    ("descripcion_llm", "TEXT"),
+    ("descartada_en", "TEXT"),
+    ("motivo_descarte", "TEXT"),
+    ("absorbida_por", "INTEGER REFERENCES actions(id)"),
+    ("revisar", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+
+def _existe_tabla(conn: sqlite3.Connection, nombre: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (nombre,)
+        ).fetchone()
+        is not None
+    )
+
+
+def _migrar_a_3(conn: sqlite3.Connection) -> None:
+    """v2 -> v3: identidad de las acciones, menciones, dependencias y correcciones.
+
+    Las menciones se rellenan con lo unico que habia: la reunion de origen y,
+    si es distinta, la ultima. Las intermedias de una accion con mas de dos se
+    pierden (el contador `menciones` se conserva tal cual hasta que algo la
+    recalcule); `python memoria.py --migrar` dice cuantas son antes de migrar.
+    """
+    if _existe_tabla(conn, "actions"):
+        actuales = _columnas(conn, "actions")
+        for nombre, definicion in _COLUMNAS_ACCIONES_V3:
+            if nombre not in actuales:
+                conn.execute(f"ALTER TABLE actions ADD COLUMN {nombre} {definicion}")
+    # Las tablas nuevas tienen que existir antes de rellenarlas. `_ESQUEMA` es
+    # idempotente y ya se puede ejecutar: todas las columnas que indexa existen.
+    conn.executescript(_ESQUEMA)
+
+    for fila in conn.execute(
+        "SELECT id, meeting_id_origen FROM actions WHERE uid IS NULL "
+        "ORDER BY meeting_id_origen, id"
+    ).fetchall():
+        conn.execute(
+            "UPDATE actions SET uid = ? WHERE id = ?",
+            (_uid_accion(conn, fila["meeting_id_origen"]), fila["id"]),
+        )
+    conn.execute(
+        "UPDATE actions SET descripcion_llm = descripcion WHERE descripcion_llm IS NULL"
+    )
+    # Mencion de origen. Si la accion se toco despues, su estado de aquel dia no
+    # se guardo: 'abierta' es lo que devolvia `_deshacer_arrastres` en v2.
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO action_mentions (action_id, meeting_id, estado)
+        SELECT id, meeting_id_origen,
+               CASE WHEN meeting_id_ultima IS NULL
+                         OR meeting_id_ultima = meeting_id_origen
+                    THEN estado ELSE 'abierta' END
+          FROM actions
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO action_mentions (action_id, meeting_id, estado)
+        SELECT id, meeting_id_ultima, estado
+          FROM actions
+         WHERE meeting_id_ultima IS NOT NULL
+           AND meeting_id_ultima != meeting_id_origen
+        """
+    )
+    # El comentario de cada arrastre solo vivia en el JSON del modelo.
+    for reunion in conn.execute(
+        "SELECT id, datos_json FROM meetings WHERE datos_json IS NOT NULL"
+    ).fetchall():
+        try:
+            arrastres = json.loads(reunion["datos_json"]).get("arrastres") or []
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            continue
+        for arrastre in arrastres:
+            if not isinstance(arrastre, dict) or not arrastre.get("comentario"):
+                continue
+            conn.execute(
+                "UPDATE action_mentions SET comentario = ? "
+                "WHERE action_id = ? AND meeting_id = ?",
+                (str(arrastre["comentario"]), arrastre.get("action_id"), reunion["id"]),
+            )
+
+
+def menciones_perdidas_en_migracion(conn: sqlite3.Connection) -> int:
+    """Acciones de una base v2 cuyas menciones intermedias no se pueden recuperar."""
+    if not _existe_tabla(conn, "actions"):
+        return 0
+    return conn.execute(
+        """
+        SELECT count(*) FROM actions
+         WHERE menciones > CASE WHEN meeting_id_ultima IS NULL
+                                     OR meeting_id_ultima = meeting_id_origen
+                                THEN 1 ELSE 2 END
+        """
+    ).fetchone()[0]
+
 
 # --------------------------------------------------------------------------
 # Rutas
@@ -340,8 +501,9 @@ def uid_transcripcion(transcript_path: Path | str | None) -> str | None:
     """Identidad estable de una reunion, derivada del nombre de su transcripcion.
 
     Se usa en las URLs de la interfaz y como ancla de las correcciones
-    manuales, asi que tiene que sobrevivir a un reprocesado: `meetings.id` no
-    sirve porque reprocesar borra e inserta la fila.
+    manuales, asi que tiene que sobrevivir a un reprocesado. Desde el esquema
+    3 el `id` tambien sobrevive (la fila se actualiza en su sitio), pero no
+    viaja entre bases: la URL sigue yendo por `uid`.
 
     Del nombre y no de la ruta completa a proposito: mover `grabaciones/` de
     sitio, o procesar la misma transcripcion en otra maquina, no deberia
@@ -454,62 +616,75 @@ def crear_reunion(
     datos_json: dict | None = None,
     reemplazar: bool = True,
 ) -> int:
-    """Inserta la reunion y devuelve su id.
+    """Registra la reunion y devuelve su id.
 
     Con `reemplazar` (por defecto), volver a procesar la misma transcripcion
-    borra la reunion anterior en vez de duplicarla: el pipeline se ejecuta a
-    mano y se repite a menudo mientras se afinan prompts. El borrado arrastra
-    en cascada segmentos, updates, riesgos y acciones originadas en ella.
+    **actualiza la fila existente** en vez de duplicarla: el pipeline se
+    ejecuta a mano y se repite a menudo mientras se afinan prompts. Se borran
+    sus hijos regenerables (segmentos, updates, riesgos, hablantes y las
+    menciones que hizo a acciones ajenas), pero **no sus acciones**: esas las
+    reconcilia `insertar_acciones` con lo que devuelva el modelo esta vez, para
+    que las correcciones humanas, las fusiones y las dependencias sobrevivan
+    (Fase 7). Hasta la v2 la fila se borraba y la cascada se las llevaba.
 
-    **La identidad de la reunion sobrevive al reemplazo**: la fila nueva
-    conserva el `uid` y tambien el `id` de la anterior. Sin eso, cada
-    reprocesado dejaria invalidos los enlaces guardados y las citas que la
-    interfaz genera para justificar sus respuestas.
+    La identidad de la reunion (`id` y `uid`) se conserva sin trucos: la fila
+    es la misma.
     """
     if tipo not in TIPOS_REUNION:
         raise ValueError(f"Tipo de reunion desconocido: {tipo!r}")
 
-    id_previo = None
-    uid = None
+    valores = (
+        fecha,
+        titulo,
+        tipo,
+        audio_path,
+        transcript_path,
+        duracion_seg,
+        modelo_whisper,
+        modelo_llm,
+        resumen,
+        json.dumps(datos_json, ensure_ascii=False) if datos_json else None,
+    )
+
     if reemplazar and transcript_path:
-        for antigua in conn.execute(
+        antiguas = conn.execute(
             "SELECT id, uid FROM meetings WHERE transcript_path = ? ORDER BY id",
             (transcript_path,),
-        ).fetchall():
-            _deshacer_arrastres(conn, antigua["id"])
-            id_previo = antigua["id"]
-            uid = antigua["uid"] or uid
-        conn.execute(
-            "DELETE FROM meetings WHERE transcript_path = ?", (transcript_path,)
-        )
+        ).fetchall()
+        if antiguas:
+            conservada = antiguas[-1]
+            uid = next((a["uid"] for a in antiguas if a["uid"]), None)
+            # Duplicados de antes del indice UNIQUE: se borran como siempre.
+            for sobrante in antiguas[:-1]:
+                _deshacer_arrastres(conn, sobrante["id"])
+                conn.execute("DELETE FROM meetings WHERE id = ?", (sobrante["id"],))
+            meeting_id = conservada["id"]
+            _deshacer_arrastres(conn, meeting_id)
+            for tabla in ("segments", "updates", "risks", "meeting_speakers"):
+                conn.execute(f"DELETE FROM {tabla} WHERE meeting_id = ?", (meeting_id,))
+            conn.execute(
+                """
+                UPDATE meetings
+                   SET fecha = ?, titulo = ?, tipo = ?, audio_path = ?,
+                       transcript_path = ?, duracion_seg = ?, modelo_whisper = ?,
+                       modelo_llm = ?, resumen = ?, datos_json = ?,
+                       creado_en = datetime('now'), uid = ?
+                 WHERE id = ?
+                """,
+                (*valores, uid or _uid_disponible(conn, transcript_path), meeting_id),
+            )
+            _marcar_para_reconciliar(conn, meeting_id)
+            return meeting_id
 
-    if uid is None:
-        uid = _uid_disponible(conn, transcript_path)
-
-    # `id_previo` a None deja que SQLite asigne el siguiente id; con valor,
-    # reutiliza el de la fila que se acaba de borrar.
     cur = conn.execute(
         """
         INSERT INTO meetings (
-            id, uid, fecha, titulo, tipo, audio_path, transcript_path,
+            uid, fecha, titulo, tipo, audio_path, transcript_path,
             duracion_seg, modelo_whisper, modelo_llm, resumen, datos_json,
             creado_en
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         """,
-        (
-            id_previo,
-            uid,
-            fecha,
-            titulo,
-            tipo,
-            audio_path,
-            transcript_path,
-            duracion_seg,
-            modelo_whisper,
-            modelo_llm,
-            resumen,
-            json.dumps(datos_json, ensure_ascii=False) if datos_json else None,
-        ),
+        (_uid_disponible(conn, transcript_path), *valores),
     )
     return cur.lastrowid
 
@@ -517,23 +692,35 @@ def crear_reunion(
 def _deshacer_arrastres(conn: sqlite3.Connection, meeting_id: int) -> None:
     """Revierte el efecto de una reunion sobre acciones de reuniones anteriores.
 
-    Necesario antes de borrar una reunion que se va a reprocesar: sus acciones
-    propias se van en cascada, pero las ajenas la referencian en
-    `meeting_id_ultima` (sin ON DELETE, el borrado fallaria) y ademas conservan
-    las menciones y el estado que esa pasada les puso.
-
-    El estado anterior no se guarda en ninguna parte, asi que las que quedaron
-    cerradas por esta reunion vuelven a 'abierta': es lo menos danino, y la
-    nueva pasada las volvera a marcar segun lo que diga la transcripcion.
+    Se quitan las menciones que esta reunion hizo a acciones **ajenas** y se
+    recalcula cada una desde las que le quedan. Desde el esquema 3 eso
+    devuelve el estado real que tenian, no el "vuelven a abierta" que se
+    asumia cuando el estado previo no se guardaba.
     """
+    ajenas = [
+        fila["action_id"]
+        for fila in conn.execute(
+            """
+            SELECT am.action_id
+              FROM action_mentions am
+              JOIN actions a ON a.id = am.action_id
+             WHERE am.meeting_id = ? AND a.meeting_id_origen != ?
+            """,
+            (meeting_id, meeting_id),
+        ).fetchall()
+    ]
+    conn.execute(
+        f"DELETE FROM action_mentions WHERE meeting_id = ? "
+        f"AND action_id IN ({_placeholders(ajenas)})",
+        (meeting_id, *ajenas),
+    )
+    for action_id in ajenas:
+        _recalcular_accion(conn, action_id)
+    # Una accion sin menciones (no deberia quedar ninguna tras migrar) no puede
+    # seguir apuntando a esta reunion: el borrado de la fila fallaria.
     conn.execute(
         """
-        UPDATE actions
-           SET meeting_id_ultima = meeting_id_origen,
-               menciones = MAX(1, menciones - 1),
-               cerrada_en = NULL,
-               estado = CASE WHEN estado IN ('completada', 'abandonada')
-                             THEN 'abierta' ELSE estado END
+        UPDATE actions SET meeting_id_ultima = meeting_id_origen
          WHERE meeting_id_ultima = ? AND meeting_id_origen != ?
         """,
         (meeting_id, meeting_id),
@@ -653,34 +840,491 @@ def insertar_riesgos(
 def insertar_acciones(
     conn: sqlite3.Connection, meeting_id: int, acciones: list[dict]
 ) -> int:
-    """Da de alta las acciones nuevas nacidas en esta reunion."""
-    insertadas = 0
-    for accion in acciones:
-        descripcion = str(accion.get("descripcion") or "").strip()
-        if not descripcion:
-            continue
-        estado = str(accion.get("estado") or "abierta").strip().lower()
-        if estado not in ESTADOS_ACCION:
-            estado = "abierta"
-        persona_id = obtener_o_crear_persona(conn, accion.get("persona"))
+    """Da de alta las acciones nacidas en esta reunion, reconciliando si se reprocesa.
+
+    Devuelve cuantas acciones de la reunion quedan registradas a partir de esta
+    respuesta del modelo (conservadas + nuevas). El detalle lo da
+    `reconciliar_acciones`.
+    """
+    resultado = reconciliar_acciones(conn, meeting_id, acciones)
+    return resultado["conservadas"] + resultado["nuevas"]
+
+
+# --------------------------------------------------------------------------
+# Identidad, menciones y estado derivado de las acciones (Fase 7)
+# --------------------------------------------------------------------------
+
+
+def _uid_accion(conn: sqlite3.Connection, meeting_id: int) -> str:
+    """`<uid reunion>-a<n>`: identidad estable, se asigna una vez.
+
+    `n` es el siguiente al mayor ya usado con ese prefijo, no el numero de
+    acciones: tras borrar una, el hueco no se rellena con otra distinta.
+    """
+    fila = conn.execute("SELECT uid FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
+    prefijo = f"{(fila['uid'] if fila and fila['uid'] else f'm{meeting_id}')}-a"
+    mayor = 0
+    for otra in conn.execute(
+        "SELECT uid FROM actions WHERE substr(uid, 1, ?) = ?", (len(prefijo), prefijo)
+    ):
+        resto = otra["uid"][len(prefijo) :]
+        if resto.isdigit():
+            mayor = max(mayor, int(resto))
+    return f"{prefijo}{mayor + 1}"
+
+
+def _normalizar_accion(accion: dict) -> dict | None:
+    descripcion = " ".join(str(accion.get("descripcion") or "").split())
+    if not descripcion:
+        return None
+    estado = str(accion.get("estado") or "abierta").strip().lower()
+    if estado not in ESTADOS_ACCION:
+        estado = "abierta"
+    return {
+        "descripcion": descripcion,
+        "estado": estado,
+        "persona": str(accion.get("persona") or "").strip(),
+    }
+
+
+def _insertar_accion(conn: sqlite3.Connection, meeting_id: int, accion: dict) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO actions (
+            uid, descripcion, descripcion_llm, persona_id, meeting_id_origen,
+            meeting_id_ultima, estado, menciones
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+        """,
+        (
+            _uid_accion(conn, meeting_id),
+            accion["descripcion"],
+            accion["descripcion"],
+            obtener_o_crear_persona(conn, accion["persona"]),
+            meeting_id,
+            meeting_id,
+            accion["estado"],
+        ),
+    )
+    _anotar_mencion(conn, cur.lastrowid, meeting_id, accion["estado"])
+    _recalcular_accion(conn, cur.lastrowid)
+    return cur.lastrowid
+
+
+def _anotar_mencion(
+    conn: sqlite3.Connection,
+    action_id: int,
+    meeting_id: int,
+    estado: str,
+    comentario: str | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO action_mentions (action_id, meeting_id, estado, comentario)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT (action_id, meeting_id)
+        DO UPDATE SET estado = excluded.estado, comentario = excluded.comentario
+        """,
+        (action_id, meeting_id, estado, comentario or None),
+    )
+
+
+def _correccion_vigente(
+    conn: sqlite3.Connection, action_id: int, campo: str
+) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT * FROM correcciones
+         WHERE action_id = ? AND campo = ? AND deshecha_en IS NULL
+         ORDER BY creado_en DESC, id DESC
+         LIMIT 1
+        """,
+        (action_id, campo),
+    ).fetchone()
+
+
+def _derivar_accion(
+    conn: sqlite3.Connection, action_id: int, excluir_meeting_id: int | None = None
+) -> dict | None:
+    """Estado, menciones, ultima reunion y fecha de cierre, calculados.
+
+    - `menciones` y `meeting_id_ultima` salen de la **union** de las menciones
+      de la accion y de las que ha absorbido: la fusion es la union de dos
+      conjuntos, y una reunion que nombro a las dos cuenta una vez.
+    - `estado` sale de las menciones **propias**: fusionar no cambia el estado
+      de la principal.
+    - `cerrada_en` es la fecha de la reunion donde paso a cerrada (D4).
+    - Una correccion humana de estado manda sobre las menciones de reuniones
+      con fecha anterior o igual al dia en que se hizo, y cede ante las
+      posteriores, que son informacion nueva.
+
+    Con `excluir_meeting_id` se calcula como si esa reunion no la hubiera
+    mencionado: es lo que `acciones_abiertas` necesita al reprocesar.
+    Devuelve None si la accion no tiene ninguna mencion.
+    """
+    fila = conn.execute(
+        "SELECT estado, cerrada_en FROM actions WHERE id = ?", (action_id,)
+    ).fetchone()
+    if fila is None:
+        return None
+    absorbidas = [
+        f["id"]
+        for f in conn.execute("SELECT id FROM actions WHERE absorbida_por = ?", (action_id,))
+    ]
+    ids = [action_id, *absorbidas]
+    menciones = conn.execute(
+        f"""
+        SELECT am.action_id, am.meeting_id, am.estado, m.fecha
+          FROM action_mentions am
+          JOIN meetings m ON m.id = am.meeting_id
+         WHERE am.action_id IN ({_placeholders(ids)})
+           AND am.meeting_id IS NOT ?
+         ORDER BY m.fecha, m.id, am.action_id != ?
+        """,
+        (*ids, excluir_meeting_id, action_id),
+    ).fetchall()
+    if not menciones:
+        return None
+
+    estado, cerrada_en, ultima_propia = fila["estado"], fila["cerrada_en"], None
+    propias = [m for m in menciones if m["action_id"] == action_id]
+    if propias:
+        estado, cerrada_en = None, None
+        for mencion in propias:
+            if mencion["estado"] in ESTADOS_CERRADOS:
+                if estado not in ESTADOS_CERRADOS:
+                    cerrada_en = mencion["fecha"]
+            else:
+                cerrada_en = None
+            estado = mencion["estado"]
+        ultima_propia = propias[-1]["fecha"]
+
+    correccion = _correccion_vigente(conn, action_id, "estado")
+    if correccion and (ultima_propia is None or correccion["creado_en"][:10] >= ultima_propia):
+        nuevo = correccion["valor_nuevo"]
+        if nuevo in ESTADOS_CERRADOS:
+            if estado not in ESTADOS_CERRADOS or not cerrada_en:
+                cerrada_en = correccion["creado_en"][:10]
+        else:
+            cerrada_en = None
+        estado = nuevo
+
+    return {
+        "estado": estado,
+        "cerrada_en": cerrada_en,
+        "menciones": len({m["meeting_id"] for m in menciones}),
+        "meeting_id_ultima": menciones[-1]["meeting_id"],
+    }
+
+
+def _recalcular_accion(conn: sqlite3.Connection, action_id: int) -> None:
+    """Rehace la cache de `actions` desde `action_mentions` y las correcciones.
+
+    Si la accion esta absorbida, recalcula tambien la principal, cuya union de
+    menciones acaba de cambiar.
+    """
+    derivado = _derivar_accion(conn, action_id)
+    if derivado is not None:
         conn.execute(
             """
-            INSERT INTO actions (
-                descripcion, persona_id, meeting_id_origen, meeting_id_ultima,
-                estado, menciones, cerrada_en
-            ) VALUES (?, ?, ?, ?, ?, 1, ?)
+            UPDATE actions
+               SET estado = ?, cerrada_en = ?, menciones = ?, meeting_id_ultima = ?
+             WHERE id = ?
             """,
             (
-                descripcion,
-                persona_id,
-                meeting_id,
-                meeting_id,
-                estado,
-                _hoy(conn) if estado in ("completada", "abandonada") else None,
+                derivado["estado"],
+                derivado["cerrada_en"],
+                derivado["menciones"],
+                derivado["meeting_id_ultima"],
+                action_id,
             ),
         )
-        insertadas += 1
-    return insertadas
+    fila = conn.execute(
+        "SELECT absorbida_por FROM actions WHERE id = ?", (action_id,)
+    ).fetchone()
+    if fila and fila["absorbida_por"]:
+        _recalcular_accion(conn, fila["absorbida_por"])
+
+
+# --------------------------------------------------------------------------
+# Reconciliacion al reprocesar (Fase 7, seccion 7.3)
+# --------------------------------------------------------------------------
+
+_TABLA_PENDIENTES = "temp.reconciliacion_pendiente"
+
+
+def _marcar_para_reconciliar(conn: sqlite3.Connection, meeting_id: int) -> None:
+    """Apunta las acciones que la pasada anterior dejo en esta reunion.
+
+    Va en una tabla temporal de la conexion, no en la base: es un estado de
+    esta pasada, y `insertar_acciones` lo consume. Si nadie lo consume (se
+    reprocesa sin volver a insertar acciones) las acciones se quedan como
+    estaban, que es lo menos destructivo.
+    """
+    conn.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS reconciliacion_pendiente ("
+        " meeting_id INTEGER NOT NULL, action_id INTEGER NOT NULL,"
+        " PRIMARY KEY (meeting_id, action_id))"
+    )
+    conn.execute(f"DELETE FROM {_TABLA_PENDIENTES} WHERE meeting_id = ?", (meeting_id,))
+    conn.execute(
+        f"INSERT INTO {_TABLA_PENDIENTES} (meeting_id, action_id) "
+        "SELECT ?, id FROM actions WHERE meeting_id_origen = ?",
+        (meeting_id, meeting_id),
+    )
+
+
+def _acciones_a_reconciliar(
+    conn: sqlite3.Connection, meeting_id: int, pendientes: bool
+) -> list[dict]:
+    """Las acciones nacidas en la reunion, con lo que hace falta para emparejar.
+
+    Con `pendientes` solo las que marco `crear_reunion` en esta conexion (las
+    que ya se han reconciliado o insertado en esta pasada no vuelven a entrar).
+    """
+    filtro = "a.meeting_id_origen = ?"
+    if pendientes:
+        existe = conn.execute(
+            "SELECT 1 FROM temp.sqlite_master WHERE name = 'reconciliacion_pendiente'"
+        ).fetchone()
+        if not existe:
+            return []
+        filtro += (
+            f" AND a.id IN (SELECT action_id FROM {_TABLA_PENDIENTES}"
+            " WHERE meeting_id = a.meeting_id_origen)"
+        )
+    return [
+        dict(fila)
+        for fila in conn.execute(
+            f"""
+            SELECT a.id, a.uid, a.descripcion, a.descripcion_llm, a.estado,
+                   a.descartada_en, a.absorbida_por, p.nombre AS persona
+              FROM actions a
+              LEFT JOIN personas p ON p.id = a.persona_id
+             WHERE {filtro}
+             ORDER BY a.id
+            """,
+            (meeting_id,),
+        ).fetchall()
+    ]
+
+
+def _huella_texto(texto: str | None) -> str:
+    """Texto sin acentos, sin mayusculas y sin puntuacion, para comparar."""
+    limpio = sin_acentos(texto or "").lower()
+    limpio = re.sub(r"[^a-z0-9 ]+", " ", limpio)
+    return " ".join(limpio.split())
+
+
+def emparejar_acciones(
+    existentes: list[dict],
+    nuevas: list[dict],
+    umbral: float = UMBRAL_RECONCILIACION,
+) -> dict:
+    """Empareja acciones guardadas con las que acaba de devolver el modelo.
+
+    Pura: no toca la base, para poder probarla y ensenarla en seco. Exclusiva:
+    cada fila empareja una vez como mucho, igual que los perfiles de voz.
+
+    1. `descripcion_llm` normalizada identica a la nueva descripcion.
+    2. Similitud de `SequenceMatcher` >= `umbral`, de mayor a menor y, a
+       igualdad, primero las del mismo responsable.
+
+    Se compara con `descripcion_llm` y no con `descripcion`: una descripcion
+    corregida a mano nunca se parecera a lo que vuelva a generar el modelo.
+
+    Devuelve `parejas` (indice existente, indice nuevo, similitud, metodo),
+    `sin_pareja` (indices de existentes) y `nuevas` (indices de nuevas).
+    """
+    from difflib import SequenceMatcher
+
+    huellas_e = [_huella_texto(e.get("descripcion_llm") or e.get("descripcion")) for e in existentes]
+    huellas_n = [_huella_texto(n.get("descripcion")) for n in nuevas]
+    libres_e = set(range(len(existentes)))
+    libres_n = set(range(len(nuevas)))
+    parejas = []
+
+    for i in range(len(existentes)):
+        for j in sorted(libres_n):
+            if huellas_e[i] and huellas_e[i] == huellas_n[j]:
+                parejas.append((i, j, 1.0, "identica"))
+                libres_e.discard(i)
+                libres_n.discard(j)
+                break
+
+    candidatas = []
+    for i in libres_e:
+        for j in libres_n:
+            similitud = SequenceMatcher(None, huellas_e[i], huellas_n[j]).ratio()
+            if similitud >= umbral:
+                misma = sin_acentos(existentes[i].get("persona") or "") == sin_acentos(
+                    nuevas[j].get("persona") or ""
+                )
+                candidatas.append((similitud, misma, i, j))
+    candidatas.sort(key=lambda c: (-c[0], not c[1], c[2], c[3]))
+    for similitud, _misma, i, j in candidatas:
+        if i in libres_e and j in libres_n:
+            parejas.append((i, j, round(similitud, 3), "similar"))
+            libres_e.discard(i)
+            libres_n.discard(j)
+
+    return {
+        "parejas": sorted(parejas),
+        "sin_pareja": sorted(libres_e),
+        "nuevas": sorted(libres_n),
+    }
+
+
+def accion_protegida(conn: sqlite3.Connection, action_id: int) -> bool:
+    """Si un humano ha puesto algo en ella que un reproceso no debe borrar.
+
+    Correcciones vigentes, descarte, fusion (en cualquier sentido) o
+    dependencias (en cualquier sentido).
+    """
+    return bool(
+        conn.execute(
+            """
+            SELECT EXISTS (SELECT 1 FROM correcciones
+                            WHERE action_id = :id AND deshecha_en IS NULL)
+                OR EXISTS (SELECT 1 FROM actions
+                            WHERE id = :id
+                              AND (descartada_en IS NOT NULL
+                                   OR absorbida_por IS NOT NULL))
+                OR EXISTS (SELECT 1 FROM actions WHERE absorbida_por = :id)
+                OR EXISTS (SELECT 1 FROM action_dependencias
+                            WHERE action_id = :id OR depende_de_id = :id)
+            """,
+            {"id": action_id},
+        ).fetchone()[0]
+    )
+
+
+def reconciliar_acciones(
+    conn: sqlite3.Connection, meeting_id: int, acciones: list[dict]
+) -> dict:
+    """Sustituye al borrado en cascada de las acciones al reprocesar.
+
+    - **Con pareja**: se conserva la fila (`id`, `uid`, vinculos). Los campos
+      con correccion vigente mantienen el valor humano; el resto toma el del
+      modelo. `descripcion_llm` pasa a la nueva redaccion. Descartada o
+      absorbida, sigue estandolo.
+    - **Sin pareja y protegida**: se conserva con `revisar = 1`.
+    - **Sin pareja y sin proteger**: se borra, como antes.
+    - Lo que el modelo devuelve sin pareja se inserta como nuevo.
+
+    En una reunion que se procesa por primera vez no hay nada que emparejar y
+    todo entra como nuevo.
+    """
+    limpias = [a for a in (_normalizar_accion(x) for x in acciones) if a]
+    existentes = _acciones_a_reconciliar(conn, meeting_id, pendientes=True)
+    plan = emparejar_acciones(existentes, limpias)
+    resultado = {"conservadas": 0, "revisar": 0, "borradas": 0, "nuevas": 0}
+
+    for i, j, _similitud, _metodo in plan["parejas"]:
+        vieja, nueva = existentes[i], limpias[j]
+        descripcion = (
+            vieja["descripcion"]
+            if _correccion_vigente(conn, vieja["id"], "descripcion")
+            else nueva["descripcion"]
+        )
+        persona_id = (
+            conn.execute(
+                "SELECT persona_id FROM actions WHERE id = ?", (vieja["id"],)
+            ).fetchone()[0]
+            if _correccion_vigente(conn, vieja["id"], "persona")
+            else obtener_o_crear_persona(conn, nueva["persona"])
+        )
+        conn.execute(
+            """
+            UPDATE actions
+               SET descripcion = ?, descripcion_llm = ?, persona_id = ?, revisar = 0
+             WHERE id = ?
+            """,
+            (descripcion, nueva["descripcion"], persona_id, vieja["id"]),
+        )
+        _anotar_mencion(conn, vieja["id"], meeting_id, nueva["estado"])
+        _recalcular_accion(conn, vieja["id"])
+        resultado["conservadas"] += 1
+
+    # Las nuevas antes de borrar nada: `_uid_accion` numera a partir del mayor
+    # uid existente, y si la borrada era la ultima su uid se le daria a otra
+    # accion distinta, con lo que un enlace guardado cambiaria de destino.
+    for j in plan["nuevas"]:
+        _insertar_accion(conn, meeting_id, limpias[j])
+        resultado["nuevas"] += 1
+
+    for i in plan["sin_pareja"]:
+        vieja = existentes[i]
+        if accion_protegida(conn, vieja["id"]):
+            conn.execute("UPDATE actions SET revisar = 1 WHERE id = ?", (vieja["id"],))
+            resultado["revisar"] += 1
+        else:
+            conn.execute("DELETE FROM actions WHERE id = ?", (vieja["id"],))
+            resultado["borradas"] += 1
+
+    if existentes:
+        conn.execute(f"DELETE FROM {_TABLA_PENDIENTES} WHERE meeting_id = ?", (meeting_id,))
+    return resultado
+
+
+def simular_reconciliacion(
+    conn: sqlite3.Connection,
+    meeting_id: int | None,
+    acciones: list[dict],
+    umbral: float = UMBRAL_RECONCILIACION,
+) -> dict:
+    """Lo que haria `reconciliar_acciones` al reprocesar, sin escribir nada.
+
+    Alimenta `summarize_teams.py --dry-run-reconciliacion`, que es como se
+    calibra `UMBRAL_RECONCILIACION`. Para cada existente sin pareja se da
+    ademas su mejor candidata, aunque no llegue al umbral: es justo el dato
+    que hace falta para saber si el umbral esta demasiado alto.
+    """
+    from difflib import SequenceMatcher
+
+    limpias = [a for a in (_normalizar_accion(x) for x in acciones) if a]
+    existentes = (
+        _acciones_a_reconciliar(conn, meeting_id, pendientes=False)
+        if meeting_id is not None
+        else []
+    )
+    plan = emparejar_acciones(existentes, limpias, umbral)
+    parejas = [
+        {
+            "uid": existentes[i]["uid"],
+            "guardada": existentes[i]["descripcion_llm"] or existentes[i]["descripcion"],
+            "nueva": limpias[j]["descripcion"],
+            "similitud": similitud,
+            "metodo": metodo,
+        }
+        for i, j, similitud, metodo in plan["parejas"]
+    ]
+    sin_pareja = []
+    for i in plan["sin_pareja"]:
+        vieja = existentes[i]
+        huella = _huella_texto(vieja["descripcion_llm"] or vieja["descripcion"])
+        mejor = max(
+            (
+                (SequenceMatcher(None, huella, _huella_texto(n["descripcion"])).ratio(), n)
+                for n in limpias
+            ),
+            key=lambda par: par[0],
+            default=(0.0, None),
+        )
+        sin_pareja.append(
+            {
+                "uid": vieja["uid"],
+                "guardada": vieja["descripcion_llm"] or vieja["descripcion"],
+                "protegida": accion_protegida(conn, vieja["id"]),
+                "mejor_candidata": mejor[1]["descripcion"] if mejor[1] else None,
+                "similitud": round(mejor[0], 3),
+            }
+        )
+    return {
+        "umbral": umbral,
+        "parejas": parejas,
+        "sin_pareja": sin_pareja,
+        "nuevas": [limpias[j]["descripcion"] for j in plan["nuevas"]],
+    }
 
 
 def _hoy(conn: sqlite3.Connection) -> str:
@@ -762,7 +1406,7 @@ def listar_reuniones(
                m.resumen, m.audio_path, m.transcript_path, m.creado_en,
                (SELECT count(*) FROM segments s WHERE s.meeting_id = m.id)
                    AS n_segmentos,
-               (SELECT count(*) FROM actions a WHERE a.meeting_id_origen = m.id)
+               (SELECT count(*) FROM acciones_vigentes a WHERE a.meeting_id_origen = m.id)
                    AS n_acciones,
                (SELECT count(*) FROM risks r WHERE r.meeting_id = m.id)
                    AS n_riesgos,
@@ -929,13 +1573,13 @@ def riesgos_recientes(
 # interfaz pinta "nacidas aqui" y "arrastradas" con la misma tarjeta, y solo
 # cambia el encabezado.
 _SQL_ACCIONES_DE_REUNION = """
-SELECT a.id, a.descripcion, a.estado, a.menciones, a.cerrada_en,
-       p.nombre AS persona,
+SELECT a.id, a.uid, a.descripcion, a.estado, a.menciones, a.cerrada_en,
+       a.revisar, p.nombre AS persona,
        mo.uid AS origen_uid, mo.fecha AS origen_fecha,
        COALESCE(mu.uid, mo.uid) AS ultima_uid,
        COALESCE(mu.fecha, mo.fecha) AS ultima_fecha,
        (a.menciones >= ? AND a.estado NOT IN ({cerrados})) AS estancada
-  FROM actions a
+  FROM acciones_vigentes a
   LEFT JOIN personas p ON p.id = a.persona_id
   JOIN meetings mo ON mo.id = a.meeting_id_origen
   LEFT JOIN meetings mu ON mu.id = a.meeting_id_ultima
@@ -1022,8 +1666,8 @@ def segmentos_de_reunion(
 # es aqui una columna de primera clase: la pregunta que responde esta vista es
 # "que lleva demasiado tiempo sin moverse".
 _SQL_ACCIONES = """
-SELECT a.id, a.descripcion, a.estado, a.menciones, a.cerrada_en,
-       p.nombre AS persona,
+SELECT a.id, a.uid, a.descripcion, a.estado, a.menciones, a.cerrada_en,
+       a.revisar, p.nombre AS persona,
        mo.uid AS origen_uid, mo.fecha AS origen_fecha, mo.titulo AS origen_titulo,
        COALESCE(mu.uid, mo.uid) AS ultima_uid,
        COALESCE(mu.fecha, mo.fecha) AS ultima_fecha,
@@ -1041,7 +1685,7 @@ SELECT a.id, a.descripcion, a.estado, a.menciones, a.cerrada_en,
 # con la consulta principal: son la misma poblacion contada de otra manera, y
 # duplicarlo seria la forma mas facil de que un dia dejaran de coincidir.
 _DESDE_ACCIONES = """
-  FROM actions a
+  FROM acciones_vigentes a
   LEFT JOIN personas p ON p.id = a.persona_id
   JOIN meetings mo ON mo.id = a.meeting_id_origen
   LEFT JOIN meetings mu ON mu.id = a.meeting_id_ultima
@@ -1406,9 +2050,9 @@ def resumen_bd(conn: sqlite3.Connection) -> dict:
         "journal_mode": conn.execute("PRAGMA journal_mode").fetchone()[0],
         "reuniones": cuantos("meetings"),
         "personas": cuantos("personas"),
-        "acciones": cuantos("actions"),
+        "acciones": cuantos("acciones_vigentes"),
         "acciones_abiertas": conn.execute(
-            "SELECT count(*) FROM actions WHERE estado NOT IN ('completada', 'abandonada')"
+            "SELECT count(*) FROM acciones_vigentes WHERE estado NOT IN ('completada', 'abandonada')"
         ).fetchone()[0],
         "riesgos": cuantos("risks"),
         "segmentos": cuantos("segments"),
@@ -1495,14 +2139,15 @@ def metricas(
     periodo** filtrado.
 
     Lo que no esta, falta por falta de dato y no por olvido: tiempo medio de
-    cierre (D4: `cerrada_en` es la fecha de proceso), personas sin actualizar
+    cierre (D4: `cerrada_en` es la fecha de la reunion que la cerro, no la
+    del inicio del trabajo), personas sin actualizar
     (D7: no hay roster) y bloqueos recurrentes (D8: texto libre).
     """
     where, valores = _filtros_reuniones(desde, hasta, None)
 
     por_estado = {estado: 0 for estado in ESTADOS_ACCION}
     for fila in conn.execute(
-        "SELECT estado, count(*) AS n FROM actions GROUP BY estado"
+        "SELECT estado, count(*) AS n FROM acciones_vigentes GROUP BY estado"
     ):
         # Un estado inesperado (escrito por una version anterior) se cuenta
         # igualmente: es preferible a que los totales no cuadren.
@@ -1510,7 +2155,7 @@ def metricas(
 
     estancadas = conn.execute(
         f"""
-        SELECT count(*) FROM actions
+        SELECT count(*) FROM acciones_vigentes
          WHERE menciones >= ?
            AND estado NOT IN ({_placeholders(ESTADOS_CERRADOS)})
         """,
@@ -1523,11 +2168,11 @@ def metricas(
         valores,
     ).fetchall()
 
-    # `cerrada_en` se compara con el mismo rango que las reuniones aunque sea
-    # la fecha de *proceso* y no la del cierre real (D4). Es la unica que hay;
-    # la interfaz lo advierte al lado del numero en vez de callarselo.
+    # Desde el esquema 3, `cerrada_en` es la fecha de la reunion donde se dio
+    # por cerrada (D4), comparable con el mismo rango que las reuniones. La
+    # interfaz sigue advirtiendo que no es el dia exacto del cierre.
     cierres = conn.execute(
-        "SELECT cerrada_en FROM actions WHERE cerrada_en IS NOT NULL"
+        "SELECT cerrada_en FROM acciones_vigentes WHERE cerrada_en IS NOT NULL"
         + (" AND cerrada_en >= ?" if desde else "")
         + (" AND cerrada_en <= ?" if hasta else ""),
         [f for f in (desde, hasta) if f],
@@ -1583,10 +2228,10 @@ def metricas(
                    (SELECT count(*) FROM updates u
                       JOIN meetings m ON m.id = u.meeting_id
                      WHERE u.persona_id = p.id {_y(where)}) AS updates,
-                   (SELECT count(*) FROM actions a
+                   (SELECT count(*) FROM acciones_vigentes a
                       JOIN meetings m ON m.id = a.meeting_id_origen
                      WHERE a.persona_id = p.id {_y(where)}) AS acciones,
-                   (SELECT count(*) FROM actions a
+                   (SELECT count(*) FROM acciones_vigentes a
                      WHERE a.persona_id = p.id
                        AND a.estado NOT IN
                            ({_placeholders(ESTADOS_CERRADOS)})) AS abiertas
@@ -1665,14 +2310,14 @@ def carriles_acciones(
     where = " WHERE " + " AND ".join(condiciones) if condiciones else ""
     return conn.execute(
         f"""
-        SELECT a.id, a.descripcion, a.estado, a.menciones,
+        SELECT a.id, a.uid, a.descripcion, a.estado, a.menciones,
                p.nombre AS persona,
                mo.uid AS origen_uid, mo.fecha AS origen_fecha,
                COALESCE(mu.uid, mo.uid) AS ultima_uid,
                COALESCE(mu.fecha, mo.fecha) AS ultima_fecha,
                (a.menciones >= ? AND a.estado NOT IN
                     ({_placeholders(ESTADOS_CERRADOS)})) AS estancada
-          FROM actions a
+          FROM acciones_vigentes a
           LEFT JOIN personas p ON p.id = a.persona_id
           JOIN meetings mo ON mo.id = a.meeting_id_origen
           LEFT JOIN meetings mu ON mu.id = a.meeting_id_ultima
@@ -1704,10 +2349,10 @@ def acciones_cerradas(
 ) -> list[sqlite3.Row]:
     """Acciones que se dieron por cerradas dentro del periodo.
 
-    **`cerrada_en` es la fecha en que se proceso la reunion que las cerro, no
-    la del cierre real** (D4). Es la unica que hay, y quien la muestre tiene
-    que decirlo: una daily del jueves procesada el lunes cierra sus acciones
-    con fecha de lunes.
+    `cerrada_en` es la fecha de la **reunion** donde se dio por cerrada, o el
+    dia de la correccion manual (D4, resuelta en el esquema 3: hasta la v2 era
+    la fecha de proceso). Quien la muestre dice que no es el dia exacto en que
+    se termino.
     """
     condiciones = [
         f"a.estado IN ({_placeholders(ESTADOS_CERRADOS)})",
@@ -1729,7 +2374,7 @@ def acciones_cerradas(
     valores.append(limite)
     return conn.execute(
         f"""
-        SELECT a.id, a.descripcion, a.estado, a.menciones, a.cerrada_en,
+        SELECT a.id, a.uid, a.descripcion, a.estado, a.menciones, a.cerrada_en,
                p.nombre AS persona,
                mo.uid AS origen_uid, mo.fecha AS origen_fecha,
                mo.titulo AS origen_titulo,
@@ -1746,9 +2391,7 @@ def acciones_cerradas(
 
 def _huella_bloqueo(texto: str) -> str:
     """Clave de agrupacion de un bloqueo: sin acentos, sin puntuacion, plano."""
-    limpio = sin_acentos(texto).lower()
-    limpio = re.sub(r"[^a-z0-9 ]+", " ", limpio)
-    return " ".join(limpio.split())
+    return _huella_texto(texto)
 
 
 def bloqueos_recurrentes(
@@ -1864,11 +2507,11 @@ def personas_sin_actualizar(
                   JOIN meetings m ON m.id = u.meeting_id
                  WHERE u.persona_id = p.id
                    AND m.fecha <= ?) AS ultimo_update,
-               (SELECT count(*) FROM actions a
+               (SELECT count(*) FROM acciones_vigentes a
                  WHERE a.persona_id = p.id
                    AND a.estado NOT IN ({_placeholders(ESTADOS_CERRADOS)}))
                    AS abiertas,
-               (SELECT count(*) FROM actions a
+               (SELECT count(*) FROM acciones_vigentes a
                  WHERE a.persona_id = p.id
                    AND a.menciones >= ?
                    AND a.estado NOT IN ({_placeholders(ESTADOS_CERRADOS)}))
@@ -1931,7 +2574,7 @@ def acciones_sin_mencion(
     """
     return conn.execute(
         f"""
-        SELECT a.id, a.descripcion, a.estado, a.menciones,
+        SELECT a.id, a.uid, a.descripcion, a.estado, a.menciones,
                p.nombre AS persona,
                mo.uid AS origen_uid, mo.fecha AS origen_fecha,
                mo.titulo AS origen_titulo,
@@ -1954,68 +2597,103 @@ def acciones_sin_mencion(
     ).fetchall()
 
 
-# `excluir_meeting_id` no se limita a filtrar: simula el efecto de
-# `_deshacer_arrastres`, porque al reprocesar una reunion esa pasada se va a
-# deshacer igualmente. Sin esto, una accion ajena que la pasada anterior marco
-# como completada no volveria a ofrecerse al modelo y el reproceso no seria
-# idempotente.
-_SQL_ACCIONES_ABIERTAS = """
-WITH excluida(id) AS (SELECT ?),
-recientes AS (
-    SELECT id FROM meetings
-     WHERE id IS NOT (SELECT id FROM excluida)
-     ORDER BY fecha DESC, id DESC
-     LIMIT ?
-),
-calc AS (
-    SELECT a.id,
-           a.descripcion,
-           a.persona_id,
-           CASE WHEN a.meeting_id_ultima IS (SELECT id FROM excluida)
-                     AND a.estado IN ('completada', 'abandonada')
-                THEN 'abierta' ELSE a.estado END AS estado,
-           CASE WHEN a.meeting_id_ultima IS (SELECT id FROM excluida)
-                THEN MAX(1, a.menciones - 1) ELSE a.menciones END AS menciones,
-           CASE WHEN a.meeting_id_ultima IS (SELECT id FROM excluida)
-                THEN a.meeting_id_origen ELSE a.meeting_id_ultima END AS meeting_ref
-      FROM actions a
-     WHERE a.meeting_id_origen IS NOT (SELECT id FROM excluida)
-)
-SELECT c.id, c.descripcion, c.estado, c.menciones,
-       p.nombre AS persona, m.fecha AS ultima_fecha
-  FROM calc c
-  LEFT JOIN personas p ON p.id = c.persona_id
-  LEFT JOIN meetings m ON m.id = c.meeting_ref
- WHERE c.estado NOT IN ('completada', 'abandonada')
-   AND c.meeting_ref IN (SELECT id FROM recientes)
- ORDER BY c.menciones DESC, c.id
-"""
-
-
 def acciones_abiertas(
     conn: sqlite3.Connection,
     ultimas_reuniones: int = 5,
     excluir_meeting_id: int | None = None,
-) -> list[sqlite3.Row]:
-    """Acciones sin cerrar vistas por ultima vez en las ultimas N reuniones.
+) -> list[dict]:
+    """Acciones vigentes sin cerrar vistas por ultima vez en las ultimas N reuniones.
 
-    Con `excluir_meeting_id` se ignora esa reunion: sus acciones propias no
-    se ofrecen (se borraran al reprocesarla) y las ajenas se devuelven con el
-    estado y las menciones que tenian antes de que esa pasada las tocara.
+    Lee de `acciones_vigentes`: lo descartado y lo absorbido no se le ofrece
+    al modelo. La descripcion es la vigente (la corregida, si la hay), que es
+    la que el equipo reconocera. Cada una lleva en `bloqueada_por` los ids de
+    las acciones abiertas de las que depende.
+
+    `excluir_meeting_id` no se limita a filtrar: al reprocesar, esa pasada se
+    va a deshacer igualmente, asi que sus acciones propias no se ofrecen y las
+    ajenas se devuelven con el estado y las menciones **derivados sin ella**.
+    Sin esto, una accion que la pasada anterior dio por completada no volveria
+    a ofrecerse y el reproceso no seria idempotente.
     """
-    return conn.execute(
-        _SQL_ACCIONES_ABIERTAS, (excluir_meeting_id, ultimas_reuniones)
-    ).fetchall()
+    recientes = {
+        fila["id"]: fila["fecha"]
+        for fila in conn.execute(
+            "SELECT id, fecha FROM meetings WHERE id IS NOT ? "
+            "ORDER BY fecha DESC, id DESC LIMIT ?",
+            (excluir_meeting_id, ultimas_reuniones),
+        )
+    }
+    tocadas: set[int] = set()
+    if excluir_meeting_id is not None:
+        for fila in conn.execute(
+            """
+            SELECT am.action_id, a.absorbida_por
+              FROM action_mentions am JOIN actions a ON a.id = am.action_id
+             WHERE am.meeting_id = ?
+            """,
+            (excluir_meeting_id,),
+        ):
+            tocadas.add(fila["absorbida_por"] or fila["action_id"])
+
+    resultado = []
+    for fila in conn.execute(
+        """
+        SELECT a.id, a.uid, a.descripcion, a.estado, a.menciones,
+               a.meeting_id_ultima, p.nombre AS persona
+          FROM acciones_vigentes a
+          LEFT JOIN personas p ON p.id = a.persona_id
+         WHERE a.meeting_id_origen IS NOT ?
+        """,
+        (excluir_meeting_id,),
+    ).fetchall():
+        accion = dict(fila)
+        if accion["id"] in tocadas:
+            derivado = _derivar_accion(conn, accion["id"], excluir_meeting_id)
+            if derivado is None:
+                continue
+            accion.update(
+                estado=derivado["estado"],
+                menciones=derivado["menciones"],
+                meeting_id_ultima=derivado["meeting_id_ultima"],
+            )
+        if accion["estado"] in ESTADOS_CERRADOS:
+            continue
+        if accion["meeting_id_ultima"] not in recientes:
+            continue
+        accion["ultima_fecha"] = recientes[accion["meeting_id_ultima"]]
+        accion["bloqueada_por"] = [
+            dep["id"]
+            for dep in conn.execute(
+                f"""
+                SELECT b.id FROM action_dependencias d
+                  JOIN acciones_vigentes b ON b.id = d.depende_de_id
+                 WHERE d.action_id = ?
+                   AND b.estado NOT IN ({_placeholders(ESTADOS_CERRADOS)})
+                 ORDER BY b.id
+                """,
+                (accion["id"], *ESTADOS_CERRADOS),
+            )
+        ]
+        del accion["meeting_id_ultima"]
+        resultado.append(accion)
+    resultado.sort(key=lambda a: (-a["menciones"], a["id"]))
+    return resultado
 
 
 def aplicar_arrastres(
     conn: sqlite3.Connection, meeting_id: int, arrastres: list[dict]
 ) -> int:
-    """Actualiza estado y menciones de acciones de reuniones anteriores.
+    """Anota lo que esta reunion dijo de acciones de reuniones anteriores.
+
+    Cada arrastre es una fila de `action_mentions` (con su comentario) y la
+    accion se recalcula desde ahi, asi que el orden importa por **fecha** de
+    reunion y no por orden de proceso, y una correccion humana de estado solo
+    cede ante reuniones posteriores a ella.
 
     Los `action_id` inexistentes se descartan en silencio: el LLM puede
     inventarselos, y es mas seguro perder una actualizacion que corromper una
-    accion ajena.
+    accion ajena. Tampoco se anota una mencion de una accion a su propia
+    reunion de origen.
     """
     aplicados = 0
     for arrastre in arrastres:
@@ -2027,24 +2705,636 @@ def aplicar_arrastres(
         if estado in ("", "sin_mencion") or estado not in ESTADOS_ACCION:
             continue
         fila = conn.execute(
-            "SELECT id FROM actions WHERE id = ?", (action_id,)
+            "SELECT id, meeting_id_origen FROM actions WHERE id = ?", (action_id,)
         ).fetchone()
-        if not fila:
+        if not fila or fila["meeting_id_origen"] == meeting_id:
             continue
-        conn.execute(
-            """
-            UPDATE actions
-               SET estado = ?,
-                   menciones = menciones + 1,
-                   meeting_id_ultima = ?,
-                   cerrada_en = CASE WHEN ? IN ('completada', 'abandonada')
-                                     THEN date('now') ELSE NULL END
-             WHERE id = ?
-            """,
-            (estado, meeting_id, estado, action_id),
+        _anotar_mencion(
+            conn,
+            action_id,
+            meeting_id,
+            estado,
+            str(arrastre.get("comentario") or "").strip() or None,
         )
+        _recalcular_accion(conn, action_id)
         aplicados += 1
     return aplicados
+
+
+# --------------------------------------------------------------------------
+# Correccion humana de acciones (Fase 7, seccion 7.2)
+# --------------------------------------------------------------------------
+# Todas las operaciones corren en una transaccion (`with conn`: confirman al
+# terminar y deshacen si algo falla), dejan su fila en `correcciones` y
+# devuelven la ficha de la accion resultante. La API solo las llama.
+#
+# Deshacer no borra el historial: marca `deshecha_en` en la correccion que se
+# revierte, y con eso deja de proteger la accion frente al reproceso.
+
+
+class AccionNoEncontrada(LookupError):
+    """No hay ninguna accion con ese uid."""
+
+
+class CorreccionInvalida(ValueError):
+    """La operacion rompe una regla (ciclo, accion descartada, fusion en cadena...)."""
+
+
+# `persona=None` significa "sin responsable"; para "no cambiar" hace falta
+# un valor distinto.
+SIN_CAMBIO = object()
+
+
+def _accion_por_uid(conn: sqlite3.Connection, uid: str) -> sqlite3.Row:
+    fila = conn.execute("SELECT * FROM actions WHERE uid = ?", (uid,)).fetchone()
+    if fila is None:
+        raise AccionNoEncontrada(f"No existe la accion {uid!r}")
+    return fila
+
+
+def _registrar_correccion(
+    conn: sqlite3.Connection,
+    action_id: int,
+    campo: str,
+    anterior,
+    nuevo,
+    origen: str,
+) -> int:
+    if origen not in ORIGENES_CORRECCION:
+        raise CorreccionInvalida(
+            f"Origen desconocido {origen!r}; usa uno de {ORIGENES_CORRECCION}"
+        )
+    cur = conn.execute(
+        """
+        INSERT INTO correcciones
+            (action_id, campo, valor_anterior, valor_nuevo, origen, creado_en)
+        VALUES (?, ?, ?, ?, ?, datetime('now'))
+        """,
+        (action_id, campo, anterior, nuevo, origen),
+    )
+    return cur.lastrowid
+
+
+def _nombre_persona(conn: sqlite3.Connection, persona_id: int | None) -> str | None:
+    if persona_id is None:
+        return None
+    fila = conn.execute("SELECT nombre FROM personas WHERE id = ?", (persona_id,)).fetchone()
+    return fila["nombre"] if fila else None
+
+
+def _exigir_vigente(accion: sqlite3.Row, que: str) -> None:
+    if accion["descartada_en"]:
+        raise CorreccionInvalida(
+            f"La accion {accion['uid']} esta descartada; restaurala antes de {que}."
+        )
+    if accion["absorbida_por"]:
+        raise CorreccionInvalida(
+            f"La accion {accion['uid']} esta fusionada en otra; separala antes "
+            f"de {que}."
+        )
+
+
+def _dependencias_abiertas(conn: sqlite3.Connection, action_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        f"""
+        SELECT b.uid, b.descripcion, b.estado
+          FROM action_dependencias d
+          JOIN acciones_vigentes b ON b.id = d.depende_de_id
+         WHERE d.action_id = ?
+           AND b.estado NOT IN ({_placeholders(ESTADOS_CERRADOS)})
+         ORDER BY b.id
+        """,
+        (action_id, *ESTADOS_CERRADOS),
+    ).fetchall()
+
+
+def _crea_ciclo(conn: sqlite3.Connection, action_id: int, depende_de_id: int) -> bool:
+    """Si `action_id -> depende_de_id` cerraria un ciclo.
+
+    Recorrido en Python sobre la tabla: hay cientos de filas, no millones, y
+    una CTE recursiva no dice nada que este bucle no diga mas claro.
+    """
+    pendientes, vistos = [depende_de_id], set()
+    while pendientes:
+        actual = pendientes.pop()
+        if actual == action_id:
+            return True
+        if actual in vistos:
+            continue
+        vistos.add(actual)
+        pendientes.extend(
+            fila[0]
+            for fila in conn.execute(
+                "SELECT depende_de_id FROM action_dependencias WHERE action_id = ?",
+                (actual,),
+            )
+        )
+    return False
+
+
+def corregir_accion(
+    conn: sqlite3.Connection,
+    uid: str,
+    *,
+    descripcion: str | None = None,
+    persona=SIN_CAMBIO,
+    estado: str | None = None,
+    origen: str = "web",
+) -> dict:
+    """Cambia descripcion, responsable y/o estado de una accion vigente.
+
+    `persona` pasa por `obtener_o_crear_persona` (`None` o "" la deja sin
+    responsable). Cerrar una accion con dependencias abiertas **se permite y
+    se avisa** en `avisos`: si alguien dice en la daily que ya esta, el
+    vinculo era erroneo o ya no importa.
+    """
+    avisos: list[str] = []
+    with conn:
+        accion = _accion_por_uid(conn, uid)
+        _exigir_vigente(accion, "corregirla")
+
+        if descripcion is not None:
+            nueva = " ".join(str(descripcion).split())
+            if not nueva:
+                raise CorreccionInvalida("La descripcion no puede quedar vacia.")
+            if nueva != accion["descripcion"]:
+                conn.execute(
+                    "UPDATE actions SET descripcion = ? WHERE id = ?", (nueva, accion["id"])
+                )
+                _registrar_correccion(
+                    conn, accion["id"], "descripcion", accion["descripcion"], nueva, origen
+                )
+
+        if persona is not SIN_CAMBIO:
+            persona_id = obtener_o_crear_persona(conn, persona) if persona else None
+            if persona_id != accion["persona_id"]:
+                conn.execute(
+                    "UPDATE actions SET persona_id = ? WHERE id = ?",
+                    (persona_id, accion["id"]),
+                )
+                _registrar_correccion(
+                    conn,
+                    accion["id"],
+                    "persona",
+                    _nombre_persona(conn, accion["persona_id"]),
+                    _nombre_persona(conn, persona_id),
+                    origen,
+                )
+
+        if estado is not None:
+            nuevo = str(estado).strip().lower()
+            if nuevo not in ESTADOS_ACCION:
+                raise CorreccionInvalida(
+                    f"Estado desconocido {estado!r}; usa uno de {ESTADOS_ACCION}"
+                )
+            if nuevo != accion["estado"]:
+                _registrar_correccion(
+                    conn, accion["id"], "estado", accion["estado"], nuevo, origen
+                )
+                _recalcular_accion(conn, accion["id"])
+                if nuevo in ESTADOS_CERRADOS:
+                    for dep in _dependencias_abiertas(conn, accion["id"]):
+                        avisos.append(
+                            f"Se ha cerrado aunque depende de [{dep['uid']}] "
+                            f"«{dep['descripcion']}», que sigue {dep['estado']}."
+                        )
+    return {**detalle_accion(conn, uid), "avisos": avisos}
+
+
+def deshacer_correccion(
+    conn: sqlite3.Connection, correccion_id: int, origen: str = "web"
+) -> dict:
+    """Revierte una correccion de descripcion, responsable o estado.
+
+    Solo la ultima vigente de ese campo: deshacer una intermedia dejaria un
+    valor que nadie eligio. Descartes, fusiones y dependencias tienen su propia
+    operacion inversa (`restaurar_accion`, `separar_acciones`,
+    `quitar_dependencia`).
+    """
+    with conn:
+        correccion = conn.execute(
+            "SELECT * FROM correcciones WHERE id = ?", (correccion_id,)
+        ).fetchone()
+        if correccion is None:
+            raise CorreccionInvalida(f"No existe la correccion {correccion_id}")
+        if correccion["deshecha_en"]:
+            raise CorreccionInvalida(f"La correccion {correccion_id} ya estaba deshecha")
+        campo = correccion["campo"]
+        if campo not in ("descripcion", "persona", "estado"):
+            raise CorreccionInvalida(
+                f"Una correccion de tipo {campo!r} se deshace con su propia operacion"
+            )
+        ultima = _correccion_vigente(conn, correccion["action_id"], campo)
+        if ultima["id"] != correccion_id:
+            raise CorreccionInvalida(
+                f"Hay una correccion de {campo} posterior ({ultima['id']}); "
+                "deshaz esa primero"
+            )
+        if origen not in ORIGENES_CORRECCION:
+            raise CorreccionInvalida(f"Origen desconocido {origen!r}")
+        action_id = correccion["action_id"]
+        if campo == "descripcion":
+            conn.execute(
+                "UPDATE actions SET descripcion = ? WHERE id = ?",
+                (correccion["valor_anterior"], action_id),
+            )
+        elif campo == "persona":
+            conn.execute(
+                "UPDATE actions SET persona_id = ? WHERE id = ?",
+                (obtener_o_crear_persona(conn, correccion["valor_anterior"]), action_id),
+            )
+        conn.execute(
+            "UPDATE correcciones SET deshecha_en = datetime('now') WHERE id = ?",
+            (correccion_id,),
+        )
+        if campo == "estado":
+            _recalcular_accion(conn, action_id)
+        uid = conn.execute("SELECT uid FROM actions WHERE id = ?", (action_id,)).fetchone()[0]
+    return detalle_accion(conn, uid)
+
+
+def descartar_accion(
+    conn: sqlite3.Connection, uid: str, motivo: str | None = None, origen: str = "web"
+) -> dict:
+    """Descarte reversible: la accion no se ve, no cuenta y no se ofrece al LLM.
+
+    Nunca es un DELETE. Si se reprocesa la reunion y el modelo la vuelve a
+    generar, sigue descartada. Las dependencias **hacia** ella se borran (una
+    tarea no puede esperar a algo que no existe) y quedan anotadas en la
+    correccion para que `restaurar_accion` las reponga.
+    """
+    with conn:
+        accion = _accion_por_uid(conn, uid)
+        _exigir_vigente(accion, "descartarla")
+        dependientes = [
+            {"action_id": fila["action_id"], "creado_en": fila["creado_en"]}
+            for fila in conn.execute(
+                "SELECT action_id, creado_en FROM action_dependencias "
+                "WHERE depende_de_id = ? ORDER BY action_id",
+                (accion["id"],),
+            )
+        ]
+        conn.execute("DELETE FROM action_dependencias WHERE depende_de_id = ?", (accion["id"],))
+        motivo = " ".join(str(motivo or "").split()) or None
+        conn.execute(
+            "UPDATE actions SET descartada_en = datetime('now'), motivo_descarte = ? "
+            "WHERE id = ?",
+            (motivo, accion["id"]),
+        )
+        _registrar_correccion(
+            conn,
+            accion["id"],
+            "descarte",
+            json.dumps({"dependientes": dependientes}),
+            motivo,
+            origen,
+        )
+    return detalle_accion(conn, uid)
+
+
+def restaurar_accion(conn: sqlite3.Connection, uid: str, origen: str = "web") -> dict:
+    """Deshace `descartar_accion`, dependencias incluidas si siguen siendo validas."""
+    if origen not in ORIGENES_CORRECCION:
+        raise CorreccionInvalida(f"Origen desconocido {origen!r}")
+    with conn:
+        accion = _accion_por_uid(conn, uid)
+        if not accion["descartada_en"]:
+            raise CorreccionInvalida(f"La accion {uid} no esta descartada")
+        conn.execute(
+            "UPDATE actions SET descartada_en = NULL, motivo_descarte = NULL WHERE id = ?",
+            (accion["id"],),
+        )
+        correccion = _correccion_vigente(conn, accion["id"], "descarte")
+        if correccion:
+            try:
+                dependientes = json.loads(correccion["valor_anterior"] or "{}").get(
+                    "dependientes", []
+                )
+            except (json.JSONDecodeError, AttributeError):
+                dependientes = []
+            for dep in dependientes:
+                otra = conn.execute(
+                    "SELECT id FROM acciones_vigentes WHERE id = ?", (dep["action_id"],)
+                ).fetchone()
+                if otra and not _crea_ciclo(conn, otra["id"], accion["id"]):
+                    conn.execute(
+                        "INSERT OR IGNORE INTO action_dependencias "
+                        "(action_id, depende_de_id, creado_en) VALUES (?, ?, ?)",
+                        (otra["id"], accion["id"], dep["creado_en"]),
+                    )
+            conn.execute(
+                "UPDATE correcciones SET deshecha_en = datetime('now') WHERE id = ?",
+                (correccion["id"],),
+            )
+    return detalle_accion(conn, uid)
+
+
+def fusionar_acciones(
+    conn: sqlite3.Connection,
+    principal_uid: str,
+    duplicada_uid: str,
+    origen: str = "web",
+) -> dict:
+    """Marca `duplicada` como absorbida por `principal`.
+
+    - Las menciones no se mueven: la principal pasa a contar la **union** de
+      las suyas y las de sus absorbidas, asi que una reunion que nombro a las
+      dos cuenta una vez y separar devuelve a cada una lo suyo.
+    - El estado de la principal no cambia.
+    - No hay fusiones en cadena: si la duplicada ya absorbia otras, pasan a la
+      principal; y no se puede fusionar una accion ya absorbida ni en una.
+    - Las dependencias de la duplicada se trasladan a la principal (salvo las
+      que serian consigo misma o cerrarian un ciclo) y quedan anotadas para
+      poder separarlas.
+
+    `meeting_id_origen` de la principal **no** cambia: es el ancla con la que
+    la reconciliacion encuentra la accion al reprocesar su reunion. La fecha
+    mas antigua se ve en las menciones de `detalle_accion`.
+    """
+    with conn:
+        principal = _accion_por_uid(conn, principal_uid)
+        duplicada = _accion_por_uid(conn, duplicada_uid)
+        if principal["id"] == duplicada["id"]:
+            raise CorreccionInvalida("Una accion no se puede fusionar consigo misma.")
+        if duplicada["absorbida_por"]:
+            raise CorreccionInvalida(f"La accion {duplicada_uid} ya esta fusionada en otra.")
+        _exigir_vigente(principal, "fusionar en ella")
+        if duplicada["descartada_en"]:
+            raise CorreccionInvalida(
+                f"La accion {duplicada_uid} esta descartada; restaurala antes de fusionarla."
+            )
+
+        trasladadas = [
+            fila["id"]
+            for fila in conn.execute(
+                "SELECT id FROM actions WHERE absorbida_por = ? ORDER BY id",
+                (duplicada["id"],),
+            )
+        ]
+        conn.execute(
+            "UPDATE actions SET absorbida_por = ? WHERE absorbida_por = ?",
+            (principal["id"], duplicada["id"]),
+        )
+
+        originales = [
+            dict(fila)
+            for fila in conn.execute(
+                "SELECT action_id, depende_de_id, creado_en FROM action_dependencias "
+                "WHERE action_id = ? OR depende_de_id = ? ORDER BY action_id, depende_de_id",
+                (duplicada["id"], duplicada["id"]),
+            )
+        ]
+        conn.execute(
+            "DELETE FROM action_dependencias WHERE action_id = ? OR depende_de_id = ?",
+            (duplicada["id"], duplicada["id"]),
+        )
+        insertadas = []
+        for dep in originales:
+            desde = principal["id"] if dep["action_id"] == duplicada["id"] else dep["action_id"]
+            hacia = (
+                principal["id"] if dep["depende_de_id"] == duplicada["id"] else dep["depende_de_id"]
+            )
+            if desde == hacia or _crea_ciclo(conn, desde, hacia):
+                continue
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO action_dependencias "
+                "(action_id, depende_de_id, creado_en) VALUES (?, ?, ?)",
+                (desde, hacia, dep["creado_en"]),
+            )
+            if cur.rowcount:
+                insertadas.append({"action_id": desde, "depende_de_id": hacia})
+
+        conn.execute(
+            "UPDATE actions SET absorbida_por = ? WHERE id = ?",
+            (principal["id"], duplicada["id"]),
+        )
+        _registrar_correccion(
+            conn,
+            duplicada["id"],
+            "fusion",
+            json.dumps(
+                {
+                    "trasladadas": trasladadas,
+                    "dependencias": originales,
+                    "insertadas": insertadas,
+                }
+            ),
+            principal_uid,
+            origen,
+        )
+        _recalcular_accion(conn, duplicada["id"])
+        for otra in trasladadas:
+            _recalcular_accion(conn, otra)
+    return detalle_accion(conn, principal_uid)
+
+
+def separar_acciones(conn: sqlite3.Connection, duplicada_uid: str, origen: str = "web") -> dict:
+    """Deshace `fusionar_acciones`: cada una recupera sus menciones y sus vinculos."""
+    if origen not in ORIGENES_CORRECCION:
+        raise CorreccionInvalida(f"Origen desconocido {origen!r}")
+    with conn:
+        duplicada = _accion_por_uid(conn, duplicada_uid)
+        if not duplicada["absorbida_por"]:
+            raise CorreccionInvalida(f"La accion {duplicada_uid} no esta fusionada.")
+        principal_id = duplicada["absorbida_por"]
+        correccion = _correccion_vigente(conn, duplicada["id"], "fusion")
+        try:
+            info = json.loads(correccion["valor_anterior"]) if correccion else {}
+        except json.JSONDecodeError:
+            info = {}
+
+        for dep in info.get("insertadas", []):
+            conn.execute(
+                "DELETE FROM action_dependencias WHERE action_id = ? AND depende_de_id = ?",
+                (dep["action_id"], dep["depende_de_id"]),
+            )
+        for dep in info.get("dependencias", []):
+            conn.execute(
+                "INSERT OR IGNORE INTO action_dependencias "
+                "(action_id, depende_de_id, creado_en) VALUES (?, ?, ?)",
+                (dep["action_id"], dep["depende_de_id"], dep["creado_en"]),
+            )
+        for otra in info.get("trasladadas", []):
+            conn.execute(
+                "UPDATE actions SET absorbida_por = ? WHERE id = ? AND absorbida_por = ?",
+                (duplicada["id"], otra, principal_id),
+            )
+        conn.execute("UPDATE actions SET absorbida_por = NULL WHERE id = ?", (duplicada["id"],))
+        if correccion:
+            conn.execute(
+                "UPDATE correcciones SET deshecha_en = datetime('now') WHERE id = ?",
+                (correccion["id"],),
+            )
+        _recalcular_accion(conn, duplicada["id"])
+        _recalcular_accion(conn, principal_id)
+    return detalle_accion(conn, duplicada_uid)
+
+
+def anadir_dependencia(
+    conn: sqlite3.Connection, uid: str, depende_de_uid: str, origen: str = "web"
+) -> dict:
+    """`uid` no puede avanzar hasta `depende_de_uid`.
+
+    Solo se muestra y se da como contexto al LLM. Rechaza ciclos, la
+    dependencia consigo misma y las acciones descartadas o absorbidas.
+    """
+    with conn:
+        accion = _accion_por_uid(conn, uid)
+        otra = _accion_por_uid(conn, depende_de_uid)
+        if accion["id"] == otra["id"]:
+            raise CorreccionInvalida("Una accion no puede depender de si misma.")
+        _exigir_vigente(accion, "anadirle dependencias")
+        _exigir_vigente(otra, "depender de ella")
+        existe = conn.execute(
+            "SELECT 1 FROM action_dependencias WHERE action_id = ? AND depende_de_id = ?",
+            (accion["id"], otra["id"]),
+        ).fetchone()
+        if not existe:
+            if _crea_ciclo(conn, accion["id"], otra["id"]):
+                raise CorreccionInvalida(
+                    f"{depende_de_uid} ya depende (directa o indirectamente) de {uid}: "
+                    "seria un ciclo."
+                )
+            conn.execute(
+                "INSERT INTO action_dependencias (action_id, depende_de_id, creado_en) "
+                "VALUES (?, ?, datetime('now'))",
+                (accion["id"], otra["id"]),
+            )
+            _registrar_correccion(
+                conn, accion["id"], "dependencia", None, depende_de_uid, origen
+            )
+    return detalle_accion(conn, uid)
+
+
+def quitar_dependencia(
+    conn: sqlite3.Connection, uid: str, depende_de_uid: str, origen: str = "web"
+) -> dict:
+    with conn:
+        accion = _accion_por_uid(conn, uid)
+        otra = _accion_por_uid(conn, depende_de_uid)
+        cur = conn.execute(
+            "DELETE FROM action_dependencias WHERE action_id = ? AND depende_de_id = ?",
+            (accion["id"], otra["id"]),
+        )
+        if not cur.rowcount:
+            raise CorreccionInvalida(f"{uid} no depende de {depende_de_uid}")
+        alta = conn.execute(
+            """
+            SELECT id FROM correcciones
+             WHERE action_id = ? AND campo = 'dependencia' AND valor_nuevo = ?
+               AND deshecha_en IS NULL
+             ORDER BY id DESC LIMIT 1
+            """,
+            (accion["id"], depende_de_uid),
+        ).fetchone()
+        if alta:
+            conn.execute(
+                "UPDATE correcciones SET deshecha_en = datetime('now') WHERE id = ?",
+                (alta["id"],),
+            )
+        else:
+            # Un vinculo que no se dio de alta con `anadir_dependencia` (lo
+            # trasladó una fusion, lo repuso una restauracion): queda anotado
+            # que alguien lo quito.
+            _registrar_correccion(
+                conn, accion["id"], "dependencia", depende_de_uid, None, origen
+            )
+    return detalle_accion(conn, uid)
+
+
+def detalle_accion(conn: sqlite3.Connection, uid: str) -> dict:
+    """Ficha completa de una accion, **tambien si esta descartada o absorbida**.
+
+    Menciones con fecha y comentario (las de sus absorbidas incluidas, con el
+    uid de la que las recibio), dependencias en los dos sentidos, absorbidas y
+    el historial de correcciones.
+    """
+    accion = conn.execute(
+        """
+        SELECT a.id, a.uid, a.descripcion, a.descripcion_llm, a.estado,
+               a.menciones, a.cerrada_en, a.descartada_en, a.motivo_descarte,
+               a.revisar, p.nombre AS persona,
+               mo.uid AS origen_uid, mo.fecha AS origen_fecha,
+               COALESCE(mu.uid, mo.uid) AS ultima_uid,
+               COALESCE(mu.fecha, mo.fecha) AS ultima_fecha,
+               ab.uid AS absorbida_por
+          FROM actions a
+          LEFT JOIN personas p ON p.id = a.persona_id
+          JOIN meetings mo ON mo.id = a.meeting_id_origen
+          LEFT JOIN meetings mu ON mu.id = a.meeting_id_ultima
+          LEFT JOIN actions ab ON ab.id = a.absorbida_por
+         WHERE a.uid = ?
+        """,
+        (uid,),
+    ).fetchone()
+    if accion is None:
+        raise AccionNoEncontrada(f"No existe la accion {uid!r}")
+    ficha = dict(accion)
+    action_id = ficha.pop("id")
+    ficha["revisar"] = bool(ficha["revisar"])
+    ficha["estancada"] = (
+        ficha["menciones"] >= UMBRAL_ESTANCAMIENTO
+        and ficha["estado"] not in ESTADOS_CERRADOS
+    )
+    ficha["absorbidas"] = [
+        dict(f)
+        for f in conn.execute(
+            "SELECT uid, descripcion, estado FROM actions WHERE absorbida_por = ? ORDER BY id",
+            (action_id,),
+        )
+    ]
+    ficha["menciones_detalle"] = [
+        dict(f)
+        for f in conn.execute(
+            """
+            SELECT m.uid AS reunion_uid, m.fecha, m.titulo, am.estado,
+                   am.comentario, x.uid AS accion_uid
+              FROM action_mentions am
+              JOIN meetings m ON m.id = am.meeting_id
+              JOIN actions x ON x.id = am.action_id
+             WHERE am.action_id = ? OR x.absorbida_por = ?
+             ORDER BY m.fecha, m.id, x.id
+            """,
+            (action_id, action_id),
+        )
+    ]
+    ficha["depende_de"] = [
+        dict(f)
+        for f in conn.execute(
+            """
+            SELECT b.uid, b.descripcion, b.estado, d.creado_en
+              FROM action_dependencias d JOIN actions b ON b.id = d.depende_de_id
+             WHERE d.action_id = ?
+             ORDER BY b.id
+            """,
+            (action_id,),
+        )
+    ]
+    ficha["bloquea_a"] = [
+        dict(f)
+        for f in conn.execute(
+            """
+            SELECT b.uid, b.descripcion, b.estado, d.creado_en
+              FROM action_dependencias d JOIN actions b ON b.id = d.action_id
+             WHERE d.depende_de_id = ?
+             ORDER BY b.id
+            """,
+            (action_id,),
+        )
+    ]
+    ficha["correcciones"] = [
+        dict(f)
+        for f in conn.execute(
+            """
+            SELECT id, campo, valor_anterior, valor_nuevo, origen, creado_en, deshecha_en
+              FROM correcciones
+             WHERE action_id = ?
+             ORDER BY creado_en, id
+            """,
+            (action_id,),
+        )
+    ]
+    return ficha
 
 
 # --------------------------------------------------------------------------
@@ -2080,7 +3370,12 @@ def _main() -> None:
     if args.migrar:
         if not path.exists():
             parser.error(f"No existe la base de datos: {path}")
-        antes = sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0]
+        cruda = sqlite3.connect(path)
+        try:
+            antes = cruda.execute("PRAGMA user_version").fetchone()[0]
+            perdidas = menciones_perdidas_en_migracion(cruda) if antes < 3 else 0
+        finally:
+            cruda.close()
         conn = conectar(path)  # migra al abrir
         despues = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
@@ -2088,6 +3383,13 @@ def _main() -> None:
             print(f"{path}: ya estaba en el esquema {despues}, nada que hacer.")
         else:
             print(f"{path}: migrada del esquema {antes} al {despues}.")
+            if perdidas:
+                print(
+                    f"  Aviso: {perdidas} acciones tenian mas menciones que las dos "
+                    "que v2 guardaba (origen y ultima). Las intermedias no se "
+                    "pueden recuperar; su contador se conserva hasta que se "
+                    "recalculen."
+                )
 
     if args.info:
         conn = conectar(path, solo_lectura=True)

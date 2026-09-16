@@ -103,9 +103,11 @@ class BaseConHistorico(unittest.TestCase):
 class TestConsultasDeInforme(BaseConHistorico):
     """Las cuatro consultas nuevas de `memoria.py`."""
 
-    def test_acciones_cerradas_por_fecha_de_proceso(self):
-        hoy = date.today().isoformat()
-        cerradas = memoria.acciones_cerradas(self.conn, desde=hoy, hasta=hoy)
+    def test_acciones_cerradas_por_fecha_de_reunion(self):
+        """D4 resuelta en el esquema 3: la fecha es la de la reunion que la cerro."""
+        cerradas = memoria.acciones_cerradas(
+            self.conn, desde="2026-09-08", hasta="2026-09-08"
+        )
         descripciones = [a["descripcion"] for a in cerradas]
         self.assertIn("Cerrar el pipeline", descripciones)
         self.assertNotIn("Pedir el certificado", descripciones)
@@ -361,14 +363,17 @@ class TestMarkdown(BaseConHistorico):
         self.assertIn("estado de **hoy** del historico completo", self.markdown)
 
     def test_advierte_de_la_fecha_de_cierre(self):
-        """D4: `cerrada_en` es la fecha de proceso, no la del cierre real."""
+        """D4: `cerrada_en` es la fecha de la reunion, no la del procesado."""
         self.assertIn("Cerrar el pipeline", self.completo)
-        self.assertIn("no la del cierre real", self.completo)
+        self.assertIn("no la del procesado", self.completo)
 
     def test_una_seccion_vacia_no_advierte_de_nada(self):
-        """En el periodo cerrado no hay cierres: ni lista ni nota al pie."""
-        self.assertIn("## Cerradas en el periodo\n\n(ninguna)", self.markdown)
-        self.assertNotIn("no la del cierre real", self.markdown)
+        """En un periodo sin cierres no hay ni lista ni nota al pie."""
+        sin_cierres = report_teams.renderizar_markdown(
+            self.datos(desde="2026-09-01", hasta="2026-09-07")
+        )
+        self.assertIn("## Cerradas en el periodo\n\n(ninguna)", sin_cierres)
+        self.assertNotIn("no la del procesado", sin_cierres)
 
     def test_advierte_de_como_se_agrupan_los_bloqueos(self):
         """D8: coincidencia de texto, no deteccion de temas."""

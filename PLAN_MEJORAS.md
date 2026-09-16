@@ -646,7 +646,7 @@ reuniones juntas no caben en la ventana del modelo local. Se necesita:
 
 ---
 
-## Fase 7 — Corrección humana de acciones (esquema 3) — propuesta (2026-09-16)
+## Fase 7 — Corrección humana de acciones (esquema 3) — **implementada (motor, 2026-09-16)**
 
 **Resuelve:** el LLM crea acciones duplicadas, mal redactadas, asignadas a
 quien no es o que directamente no son tareas, y hoy no hay forma de
@@ -873,6 +873,51 @@ Contra una base temporal, como el resto:
 - Crear acciones a mano.
 - Riesgos (D3): siguen sin estado y sin corrección.
 
+### Resultado (2026-09-16)
+
+Implementada la mitad de motor: esquema 3 y su migración, las operaciones de
+7.2, la reconciliación de 7.3 y los arrastres de 7.4, todo en `memoria.py`,
+más `--dry-run-reconciliacion` en `summarize_teams.py`. Los endpoints y el
+panel de edición siguen siendo I6a. Cubierto por `tests/test_correcciones.py`
+(35 pruebas; 328 en total), incluido el criterio de aceptación y la migración
+de una copia de la base real cuando existe `datos/meetings.db`. Sobre esa
+copia: 28 acciones, 42 menciones reconstruidas (14 con su comentario sacado de
+`datos_json`), ninguna mención intermedia perdida y ningún estado cambiado al
+recalcular desde las menciones.
+
+Lo que cambió al implementarla:
+
+1. **D4 queda resuelta como decía el plan**: `cerrada_en` es la fecha de la
+   reunión en que pasó a cerrada (o el día de la corrección manual). Las
+   advertencias de `report_teams.py` y del panel de métricas se han
+   reescrito en consecuencia.
+2. **La principal no toma el `meeting_id_origen` de la duplicada.** Ese campo
+   es el ancla con la que la reconciliación encuentra la acción al reprocesar
+   su reunión de nacimiento; cambiarlo haría que el modelo la regenerara como
+   nueva. La fecha más antigua se ve en las menciones de `detalle_accion`.
+3. **Las menciones no se mueven al fusionar.** La principal cuenta la unión de
+   las suyas y las de sus absorbidas, y el estado sale solo de las propias
+   (así «su estado no cambia» se cumple también cuando la duplicada tiene una
+   mención posterior). Separar no tiene que devolver nada.
+4. **El estado se deriva por fecha de reunión, no por orden de proceso**:
+   reprocesar una daily antigua ya no pisa lo que dijo otra posterior.
+5. **La reconciliación solo actúa sobre lo que `crear_reunion` marcó** en una
+   tabla temporal de la conexión. Insertar acciones en una reunión nueva, o
+   dos veces seguidas en la misma pasada, no borra nada.
+6. **Las acciones nuevas se insertan antes de borrar las huérfanas**: si no,
+   la nueva heredaba el `uid` de la borrada (`<reunión>-a<n>` numera desde el
+   mayor existente) y un enlace guardado cambiaba de destino. Queda un caso
+   residual: si una pasada solo borra la última y otra posterior inserta, el
+   número se reutiliza.
+7. **`deshacer_correccion`**, que el plan no listaba: sin él, corregir un
+   campo no tenía vuelta atrás y la acción quedaba protegida para siempre.
+8. **`UMBRAL_RECONCILIACION = 0.75` es provisional.** Falta medirlo en el
+   servidor con `--dry-run-reconciliacion` sobre las dailys reales, con el
+   mismo modelo y con `qwen3.8-27b`.
+
+Para desplegar: `python memoria.py --migrar` en el servidor antes de
+actualizar la API (en solo lectura responde 503 con una base en esquema 2).
+
 ---
 
 ## Fase 8 — Sugerencias de duplicados — propuesta (2026-09-16)
@@ -914,7 +959,7 @@ humano. **Depende de:** Fase 7 y del índice semántico de la Fase 4.
 | ~~4~~ | ~~Fase 4 — `ask_teams.py`~~ **hecha** | Medio | Bajo | Consulta del histórico |
 | ~~5~~ | ~~Fase 5 — `report_teams.py`~~ **hecha** | Bajo | Nulo | Informes |
 | ~~6~~ | ~~Fase 3 — Perfiles de voz~~ **hecha** | Medio-alto | **Alto** | Calidad a largo plazo |
-| 7 | Fase 7 — Corrección humana de acciones (esquema 3, D10) | Alto | **Alto** | I6a de la interfaz; Fase 8 |
+| ~~7~~ | ~~Fase 7 — Corrección humana de acciones (esquema 3, D10)~~ **hecha (motor)** | Alto | **Alto** | I6a de la interfaz; Fase 8 |
 | 8 | Fase 8 — Sugerencias de duplicados | Medio | Bajo | I11 de la interfaz |
 | 9 | Fase 6 — Map-reduce | Medio | Medio | Reuniones largas |
 
