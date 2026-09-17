@@ -27,10 +27,11 @@ import os
 import re
 import sqlite3
 import unicodedata
-from datetime import date
+from contextlib import contextmanager
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
-ESQUEMA_VERSION = 3
+ESQUEMA_VERSION = 4
 
 RUTA_POR_DEFECTO = Path(__file__).resolve().parent / "datos" / "meetings.db"
 VARIABLE_ENTORNO = "TEAMS_DB"
@@ -134,7 +135,8 @@ CREATE TABLE IF NOT EXISTS actions (
   descartada_en       TEXT,
   motivo_descarte     TEXT,
   absorbida_por       INTEGER REFERENCES actions(id),
-  revisar             INTEGER NOT NULL DEFAULT 0
+  revisar             INTEGER NOT NULL DEFAULT 0,
+  version             INTEGER NOT NULL DEFAULT 1
 );
 
 -- Esquema 3 (Fase 7). `menciones`, `meeting_id_ultima`, `estado` y
@@ -201,6 +203,69 @@ CREATE INDEX IF NOT EXISTS idx_actions_origen ON actions(meeting_id_origen);
 CREATE INDEX IF NOT EXISTS idx_mentions_meeting ON action_mentions(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_correcciones_accion ON correcciones(action_id);
 
+-- Esquema 4 (I6a). `actions.version` es la concurrencia optimista del panel
+-- de edicion: sube con **cualquier** cambio que se vea en la ficha, lo haga la
+-- web, la linea de comandos o el pipeline al reprocesar. Por eso la mantienen
+-- triggers y no cada funcion que escribe: una que se olvidara de subirla
+-- dejaria a la web pisando en silencio lo que acaba de escribir otro. Los
+-- triggers no se disparan a si mismos (`recursive_triggers` esta apagado).
+CREATE TRIGGER IF NOT EXISTS actions_version AFTER UPDATE ON actions
+WHEN new.version = old.version AND (
+     new.descripcion IS NOT old.descripcion
+  OR new.persona_id IS NOT old.persona_id
+  OR new.meeting_id_origen IS NOT old.meeting_id_origen
+  OR new.meeting_id_ultima IS NOT old.meeting_id_ultima
+  OR new.estado IS NOT old.estado
+  OR new.menciones IS NOT old.menciones
+  OR new.cerrada_en IS NOT old.cerrada_en
+  OR new.uid IS NOT old.uid
+  OR new.descripcion_llm IS NOT old.descripcion_llm
+  OR new.descartada_en IS NOT old.descartada_en
+  OR new.motivo_descarte IS NOT old.motivo_descarte
+  OR new.absorbida_por IS NOT old.absorbida_por
+  OR new.revisar IS NOT old.revisar)
+BEGIN
+  UPDATE actions SET version = old.version + 1 WHERE id = new.id;
+END;
+
+-- Una mencion cambia la ficha de la accion y la de su principal, si esta
+-- absorbida (la principal ensena la union de menciones).
+CREATE TRIGGER IF NOT EXISTS mentions_version_ai AFTER INSERT ON action_mentions BEGIN
+  UPDATE actions SET version = version + 1
+   WHERE id = new.action_id
+      OR id = (SELECT absorbida_por FROM actions WHERE id = new.action_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS mentions_version_au AFTER UPDATE ON action_mentions BEGIN
+  UPDATE actions SET version = version + 1
+   WHERE id = new.action_id
+      OR id = (SELECT absorbida_por FROM actions WHERE id = new.action_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS mentions_version_ad AFTER DELETE ON action_mentions BEGIN
+  UPDATE actions SET version = version + 1
+   WHERE id = old.action_id
+      OR id = (SELECT absorbida_por FROM actions WHERE id = old.action_id);
+END;
+
+-- Una dependencia sale en la ficha de las dos: "depende de" y "bloquea a".
+CREATE TRIGGER IF NOT EXISTS dependencias_version_ai AFTER INSERT ON action_dependencias BEGIN
+  UPDATE actions SET version = version + 1 WHERE id IN (new.action_id, new.depende_de_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS dependencias_version_ad AFTER DELETE ON action_dependencias BEGIN
+  UPDATE actions SET version = version + 1 WHERE id IN (old.action_id, old.depende_de_id);
+END;
+
+-- El historial tambien es parte de la ficha (y deshacer es un UPDATE).
+CREATE TRIGGER IF NOT EXISTS correcciones_version_ai AFTER INSERT ON correcciones BEGIN
+  UPDATE actions SET version = version + 1 WHERE id = new.action_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS correcciones_version_au AFTER UPDATE ON correcciones BEGIN
+  UPDATE actions SET version = version + 1 WHERE id = new.action_id;
+END;
+
 CREATE VIRTUAL TABLE IF NOT EXISTS segments_fts USING fts5(
   texto,
   content='segments', content_rowid='id',
@@ -264,6 +329,8 @@ def conectar(
     ruta: Path | str | None = None,
     solo_lectura: bool = False,
     entre_hilos: bool = False,
+    migrar: bool = True,
+    espera: float = 5.0,
 ) -> sqlite3.Connection:
     """Abre (creando si hace falta) la BD y garantiza el esquema.
 
@@ -279,6 +346,13 @@ def conectar(
     dentro de una peticion y no se comparte con ninguna otra, asi que la
     comprobacion no protege de nada aqui. Quien reutilice una conexion entre
     peticiones tendra que serializar el acceso por su cuenta.
+
+    Con `migrar=False` (solo para escribir) no se crea el fichero ni se toca
+    el esquema: es la conexion de escritura de la API (I6a), que tiene que
+    fallar con un 503 explicativo ante una base atrasada, igual que la de
+    lectura, en vez de migrar el historico por una peticion web. `espera` son
+    los segundos que SQLite reintenta si la base esta bloqueada, que es lo
+    que pasa mientras `summarize_teams.py` guarda una reunion.
     """
     path = ruta_bd(ruta)
     if solo_lectura:
@@ -294,8 +368,19 @@ def conectar(
         conn.execute("PRAGMA query_only = ON")
         return conn
 
+    if not migrar:
+        if not path.exists():
+            raise FileNotFoundError(f"No existe la base de datos: {path}")
+        conn = _preparar(
+            sqlite3.connect(path, timeout=espera, check_same_thread=not entre_hilos)
+        )
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = _preparar(sqlite3.connect(path, check_same_thread=not entre_hilos))
+    conn = _preparar(
+        sqlite3.connect(path, timeout=espera, check_same_thread=not entre_hilos)
+    )
     conn.execute("PRAGMA foreign_keys = ON")
     # WAL permite que la API lea mientras el pipeline escribe. Es una propiedad
     # persistente de la base: basta con fijarlo una vez, pero es idempotente.
@@ -358,6 +443,15 @@ def _migrar(conn: sqlite3.Connection, desde: int) -> None:
                 (_uid_disponible(conn, fila["transcript_path"]), fila["id"]),
             )
         # El indice UNIQUE lo crea `_ESQUEMA`, justo despues de esto.
+
+    # v3 -> v4 va **antes** que la 2 -> 3: esa ejecuta `_ESQUEMA`, que ya
+    # crea los triggers de `version`, y la columna tiene que existir para que
+    # sus UPDATE no fallen al dispararse.
+    if desde and desde < 4 and _existe_tabla(conn, "actions"):
+        if "version" not in _columnas(conn, "actions"):
+            conn.execute(
+                "ALTER TABLE actions ADD COLUMN version INTEGER NOT NULL DEFAULT 1"
+            )
 
     if desde and desde < 3:
         _migrar_a_3(conn)
@@ -2281,52 +2375,128 @@ def carriles_acciones(
     desde: str | None = None,
     hasta: str | None = None,
     solo_abiertas: bool = False,
+    incluir_descartadas: bool = False,
     limite: int = 200,
-) -> list[sqlite3.Row]:
-    """Cada accion como un tramo entre la reunion donde nacio y la ultima que la menciono.
+) -> list[dict]:
+    """Cada accion como un tramo entre su primera y su ultima mencion.
 
     Es la lectura visual de la Fase 2 del motor: "esto lleva cinco dailys
     abierto" se ve sin leer nada.
 
-    **Las menciones intermedias no se pueden dibujar** (D10): la base guarda un
-    contador `menciones` y la ultima reunion, no la lista de cuales la tocaron.
-    El tramo va de origen a ultima y las menciones se muestran como cifra;
-    repartir marcas por el medio seria dibujar un dato que nadie ha guardado.
+    Desde el esquema 3 las menciones intermedias existen (`action_mentions`),
+    asi que cada carril lleva en `marcas` las reuniones que lo tocaron, para
+    dibujar un punto en cada una. Una principal cuenta tambien las de sus
+    absorbidas y su tramo **empieza en la mas antigua de todas**, no en su
+    propia reunion de origen: tras fusionar, el carril abarca las reuniones de
+    las dos. Van ademas los uid de sus dependencias en los dos sentidos, para
+    resaltarlas al pasar por encima, y cuantas acciones ha absorbido.
+
+    Las absorbidas no se devuelven nunca: viven dentro de su principal. Las
+    descartadas, solo con `incluir_descartadas` (el conmutador «ver
+    descartadas» del timeline); por eso esta funcion lee de `actions` y esta
+    en la lista blanca de los tests.
 
     Se devuelven las acciones cuyo tramo **solapa** el periodo, no solo las
     nacidas dentro: una accion de hace dos meses que sigue abierta es justo la
     que hay que ver al mirar esta semana.
     """
+    fuente = (
+        "(SELECT * FROM actions WHERE absorbida_por IS NULL)"
+        if incluir_descartadas
+        else "acciones_vigentes"
+    )
     condiciones, valores = [], []
     if desde:
-        condiciones.append("COALESCE(mu.fecha, mo.fecha) >= ?")
+        condiciones.append("ultima_fecha >= ?")
         valores.append(desde)
     if hasta:
-        condiciones.append("mo.fecha <= ?")
+        condiciones.append("primera_fecha <= ?")
         valores.append(hasta)
     if solo_abiertas:
-        condiciones.append(f"a.estado NOT IN ({_placeholders(ESTADOS_CERRADOS)})")
+        condiciones.append(f"estado NOT IN ({_placeholders(ESTADOS_CERRADOS)})")
         valores.extend(ESTADOS_CERRADOS)
     where = " WHERE " + " AND ".join(condiciones) if condiciones else ""
-    return conn.execute(
+    filas = conn.execute(
         f"""
-        SELECT a.id, a.uid, a.descripcion, a.estado, a.menciones,
-               p.nombre AS persona,
-               mo.uid AS origen_uid, mo.fecha AS origen_fecha,
-               COALESCE(mu.uid, mo.uid) AS ultima_uid,
-               COALESCE(mu.fecha, mo.fecha) AS ultima_fecha,
-               (a.menciones >= ? AND a.estado NOT IN
-                    ({_placeholders(ESTADOS_CERRADOS)})) AS estancada
-          FROM acciones_vigentes a
-          LEFT JOIN personas p ON p.id = a.persona_id
-          JOIN meetings mo ON mo.id = a.meeting_id_origen
-          LEFT JOIN meetings mu ON mu.id = a.meeting_id_ultima
-          {where}
-         ORDER BY estancada DESC, a.menciones DESC, mo.fecha, a.id
+        SELECT * FROM (
+            SELECT a.id, a.uid, a.descripcion, a.estado, a.menciones,
+                   a.revisar, a.descartada_en IS NOT NULL AS descartada,
+                   p.nombre AS persona,
+                   mo.uid AS origen_uid, mo.fecha AS origen_fecha,
+                   COALESCE(mu.uid, mo.uid) AS ultima_uid,
+                   COALESCE(mu.fecha, mo.fecha) AS ultima_fecha,
+                   COALESCE((
+                       SELECT min(m.fecha)
+                         FROM action_mentions am
+                         JOIN actions x ON x.id = am.action_id
+                         JOIN meetings m ON m.id = am.meeting_id
+                        WHERE x.id = a.id OR x.absorbida_por = a.id
+                   ), mo.fecha) AS primera_fecha,
+                   (a.menciones >= ? AND a.estado NOT IN
+                        ({_placeholders(ESTADOS_CERRADOS)})) AS estancada
+              FROM {fuente} a
+              LEFT JOIN personas p ON p.id = a.persona_id
+              JOIN meetings mo ON mo.id = a.meeting_id_origen
+              LEFT JOIN meetings mu ON mu.id = a.meeting_id_ultima
+        )
+        {where}
+         ORDER BY descartada, estancada DESC, menciones DESC, primera_fecha, id
          LIMIT ?
         """,
         (UMBRAL_ESTANCAMIENTO, *ESTADOS_CERRADOS, *valores, limite),
     ).fetchall()
+    carriles = []
+    for fila in filas:
+        carril = dict(fila)
+        for clave in ("revisar", "descartada", "estancada"):
+            carril[clave] = bool(carril[clave])
+        carril.update(marcas=[], absorbidas=0, depende_de=[], bloquea_a=[])
+        carriles.append(carril)
+    if not carriles:
+        return carriles
+
+    por_id = {c["id"]: c for c in carriles}
+    ids = list(por_id)
+    marcador = _placeholders(ids)
+    # Una marca por reunion, aunque la nombraran la principal y una absorbida.
+    for fila in conn.execute(
+        f"""
+        SELECT COALESCE(x.absorbida_por, x.id) AS principal,
+               m.uid AS reunion_uid, m.fecha
+          FROM action_mentions am
+          JOIN actions x ON x.id = am.action_id
+          JOIN meetings m ON m.id = am.meeting_id
+         WHERE COALESCE(x.absorbida_por, x.id) IN ({marcador})
+         GROUP BY principal, m.id
+         ORDER BY m.fecha, m.id
+        """,
+        ids,
+    ):
+        por_id[fila["principal"]]["marcas"].append(
+            {"reunion_uid": fila["reunion_uid"], "fecha": fila["fecha"]}
+        )
+    for fila in conn.execute(
+        f"SELECT absorbida_por, count(*) AS n FROM actions "
+        f"WHERE absorbida_por IN ({marcador}) GROUP BY absorbida_por",
+        ids,
+    ):
+        por_id[fila["absorbida_por"]]["absorbidas"] = fila["n"]
+    for fila in conn.execute(
+        f"""
+        SELECT d.action_id, d.depende_de_id, a.uid AS uid_accion, b.uid AS uid_otra
+          FROM action_dependencias d
+          JOIN actions a ON a.id = d.action_id
+          JOIN actions b ON b.id = d.depende_de_id
+         WHERE d.action_id IN ({marcador}) OR d.depende_de_id IN ({marcador})
+         ORDER BY d.action_id, d.depende_de_id
+        """,
+        ids + ids,
+    ):
+        if fila["action_id"] in por_id:
+            por_id[fila["action_id"]]["depende_de"].append(fila["uid_otra"])
+        if fila["depende_de_id"] in por_id:
+            por_id[fila["depende_de_id"]]["bloquea_a"].append(fila["uid_accion"])
+    return carriles
 
 
 # --------------------------------------------------------------------------
@@ -2738,6 +2908,123 @@ class AccionNoEncontrada(LookupError):
 
 class CorreccionInvalida(ValueError):
     """La operacion rompe una regla (ciclo, accion descartada, fusion en cadena...)."""
+
+
+class VersionObsoleta(RuntimeError):
+    """La accion ha cambiado desde que se leyo (otra pestana, o el pipeline)."""
+
+    def __init__(self, uid: str, esperada: int, actual: int):
+        super().__init__(
+            f"La accion {uid} ha cambiado mientras la mirabas (version {esperada}, "
+            f"ahora {actual}): otra pestana, o el pipeline al reprocesar."
+        )
+        self.uid, self.esperada, self.actual = uid, esperada, actual
+
+
+@contextmanager
+def comprobando_version(conn: sqlite3.Connection, uid: str, version: int):
+    """Concurrencia optimista: comprueba `version` con la base ya reservada.
+
+    `BEGIN IMMEDIATE` toma el cerrojo de escritura **antes** de leer la
+    version, asi que nadie puede cambiar la accion entre la comprobacion y la
+    operacion que va dentro del bloque. Las operaciones de correccion abren
+    su propio `with conn`, que no inicia otra transaccion sino que confirma
+    (o deshace) esta. Si algo falla antes de llegar ahi, se deshace aqui.
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        actual = _accion_por_uid(conn, uid)["version"]
+        if actual != version:
+            raise VersionObsoleta(uid, version, actual)
+        yield
+    finally:
+        if conn.in_transaction:
+            conn.rollback()
+
+
+# Copias antes de escribir desde la web (I6a): junto a la base, en `copias/`.
+DIAS_DE_COPIA = 7
+VARIABLE_DIAS_COPIA = "TEAMS_COPIAS_DIAS"
+_NOMBRE_COPIA = re.compile(r"^meetings-(\d{8})\.db$")
+
+
+def copia_de_seguridad_diaria(
+    ruta: Path | str | None = None, dias: int | None = None
+) -> Path | None:
+    """`VACUUM INTO copias/meetings-AAAAMMDD.db` si hoy aun no hay copia.
+
+    Devuelve la ruta de la copia creada, o `None` si ya existia. Conserva las
+    de los ultimos `dias` (por defecto `TEAMS_COPIAS_DIAS`, o 7) y borra las
+    anteriores; solo toca ficheros con ese patron de nombre.
+
+    Se escribe en un temporal y se renombra: dos peticiones a la vez no pueden
+    dejar una copia a medias con el nombre bueno.
+    """
+    path = ruta_bd(ruta)
+    if dias is None:
+        try:
+            dias = int(os.environ.get(VARIABLE_DIAS_COPIA) or DIAS_DE_COPIA)
+        except ValueError:
+            dias = DIAS_DE_COPIA
+    directorio = path.parent / "copias"
+    directorio.mkdir(parents=True, exist_ok=True)
+    hoy = date.today()
+    destino = directorio / f"meetings-{hoy:%Y%m%d}.db"
+    creada = None
+    if not destino.exists():
+        temporal = directorio / f".meetings-{hoy:%Y%m%d}-{os.getpid()}-{id(path)}.tmp"
+        temporal.unlink(missing_ok=True)
+        # Conexion propia y cruda: VACUUM no puede ir dentro de una transaccion
+        # ni en una conexion `query_only`.
+        cruda = sqlite3.connect(path)
+        try:
+            cruda.execute("VACUUM INTO ?", (str(temporal),))
+        finally:
+            cruda.close()
+        if destino.exists():  # otra peticion gano la carrera
+            temporal.unlink(missing_ok=True)
+        else:
+            os.replace(temporal, destino)
+            creada = destino
+    limite = hoy - timedelta(days=max(dias, 1) - 1)
+    for fichero in directorio.iterdir():
+        encaje = _NOMBRE_COPIA.match(fichero.name)
+        if not encaje:
+            continue
+        try:
+            fecha = datetime.strptime(encaje.group(1), "%Y%m%d").date()
+        except ValueError:
+            continue
+        if fecha < limite:
+            fichero.unlink(missing_ok=True)
+    return creada
+
+
+def listar_personas(conn: sqlite3.Connection) -> list[dict]:
+    """Personas con sus alias y cuantas acciones vigentes llevan (selector de I6a)."""
+    personas = []
+    for fila in conn.execute(
+        """
+        SELECT p.nombre, p.alias, p.activo, count(a.id) AS acciones
+          FROM personas p
+          LEFT JOIN acciones_vigentes a ON a.persona_id = p.id
+         GROUP BY p.id
+         ORDER BY p.nombre COLLATE NOCASE
+        """
+    ):
+        try:
+            alias = json.loads(fila["alias"]) if fila["alias"] else []
+        except json.JSONDecodeError:
+            alias = []
+        personas.append(
+            {
+                "nombre": fila["nombre"],
+                "alias": [str(a) for a in alias] if isinstance(alias, list) else [],
+                "activo": bool(fila["activo"]),
+                "acciones": fila["acciones"],
+            }
+        )
+    return personas
 
 
 # `persona=None` significa "sin responsable"; para "no cambiar" hace falta
@@ -3253,11 +3540,13 @@ def detalle_accion(conn: sqlite3.Connection, uid: str) -> dict:
         """
         SELECT a.id, a.uid, a.descripcion, a.descripcion_llm, a.estado,
                a.menciones, a.cerrada_en, a.descartada_en, a.motivo_descarte,
-               a.revisar, p.nombre AS persona,
+               a.revisar, a.version, p.nombre AS persona,
                mo.uid AS origen_uid, mo.fecha AS origen_fecha,
+               mo.titulo AS origen_titulo,
                COALESCE(mu.uid, mo.uid) AS ultima_uid,
                COALESCE(mu.fecha, mo.fecha) AS ultima_fecha,
-               ab.uid AS absorbida_por
+               COALESCE(mu.titulo, mo.titulo) AS ultima_titulo,
+               ab.uid AS absorbida_por, ab.descripcion AS absorbida_por_descripcion
           FROM actions a
           LEFT JOIN personas p ON p.id = a.persona_id
           JOIN meetings mo ON mo.id = a.meeting_id_origen
@@ -3279,7 +3568,8 @@ def detalle_accion(conn: sqlite3.Connection, uid: str) -> dict:
     ficha["absorbidas"] = [
         dict(f)
         for f in conn.execute(
-            "SELECT uid, descripcion, estado FROM actions WHERE absorbida_por = ? ORDER BY id",
+            "SELECT uid, descripcion, estado, version FROM actions "
+            "WHERE absorbida_por = ? ORDER BY id",
             (action_id,),
         )
     ]
@@ -3334,6 +3624,19 @@ def detalle_accion(conn: sqlite3.Connection, uid: str) -> dict:
             (action_id,),
         )
     ]
+    # «Corregida a mano» es lo mismo que la protege al reprocesar: una
+    # correccion vigente de un campo. Y solo la ultima vigente de cada campo
+    # se puede deshacer (`deshacer_correccion`), que es lo que ofrece el panel.
+    vigentes = {}
+    for correccion in ficha["correcciones"]:
+        if (
+            correccion["campo"] in ("descripcion", "persona", "estado")
+            and not correccion["deshecha_en"]
+        ):
+            vigentes[correccion["campo"]] = correccion["id"]
+    ficha["corregida"] = sorted(vigentes)
+    for correccion in ficha["correcciones"]:
+        correccion["deshacible"] = vigentes.get(correccion["campo"]) == correccion["id"]
     return ficha
 
 

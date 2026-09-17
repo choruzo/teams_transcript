@@ -14,8 +14,10 @@ services:
 
     environment:
       TEAMS_DB: /app/datos/meetings.db
-      # Por defecto la API no escribe. Cuando existan los endpoints de
-      # correccion manual (fase I6) habra que ponerlo a 0 conscientemente.
+      # Por defecto la API no escribe: el panel de acciones (I6a) se abre
+      # pero no deja guardar. Ponerlo a 0 conscientemente para corregir desde
+      # la web; antes de la primera escritura de cada dia se copia la base en
+      # datos/copias/ (TEAMS_COPIAS_DIAS dias, 7 por defecto).
       TEAMS_API_SOLO_LECTURA: "1"
       # La BD guarda rutas absolutas de la maquina que proceso la reunion;
       # dentro del contenedor el proyecto vive en /app. Ajusta el origen a la

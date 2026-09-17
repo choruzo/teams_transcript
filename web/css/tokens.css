@@ -36,6 +36,11 @@
   --ambar: #e8b545;   /* advertencia, INCONCLUSO, pendiente de revision */
   --rojo: #e77070;    /* error, FAIL */
 
+  /* Accion destructiva (Descartar, en el panel de I6a). Es un alias y no un
+     color nuevo: el unico boton rojo de la interfaz tiene que leerse igual que
+     los errores, y asi sigue al --rojo de cada tema sin redefinirse. */
+  --peligro: var(--rojo);
+
   /* Texto sobre una superficie de acento (--verde2 y compania). No es
      var(--text): sobre el boton primario hace falta el contrario del tema. */
   --sobre-acento: var(--bg);
@@ -47,6 +52,9 @@
 
   --sombra: 0 1px 2px rgba(0, 0, 0, 0.4);
   --foco: 0 0 0 2px rgba(52, 211, 153, 0.35);
+  /* Panel lateral de I6a: se separa del timeline por sombra y no por un velo,
+     porque no es un modal y lo de detras sigue siendo usable. */
+  --sombra-panel: -18px 0 40px rgba(0, 0, 0, 0.45);
 
   /* --- Forma y ritmo (iguales en los dos temas) --- */
   --radio: 10px;      /* tarjetas y avisos */
@@ -88,4 +96,5 @@
 
   --sombra: 0 1px 2px rgba(16, 38, 43, 0.07);
   --foco: 0 0 0 2px rgba(13, 125, 114, 0.35);
+  --sombra-panel: -18px 0 40px rgba(16, 38, 43, 0.14);
 }

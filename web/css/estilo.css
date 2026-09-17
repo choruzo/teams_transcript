@@ -501,6 +501,48 @@ footer .bien { color: var(--verde); }
 
 .tl-carril:hover .tl-barra { filter: brightness(1.25); }
 
+/* --- Carriles editables (I6a) --- */
+
+/* La fila entera es el blanco de clic: una barra de diez píxeles o un punto
+   suelto se fallan con el ratón. Transparente, pero pintada, para que reciba
+   los eventos. */
+.tl-fila { fill: transparent; }
+.tl-carril:hover .tl-fila { fill: color-mix(in srgb, var(--text) 5%, transparent); }
+
+/* Cada mención intermedia es un punto hueco sobre la barra; los extremos son
+   los nodos grandes de siempre. */
+.tl-mencion { fill: var(--panel); stroke: currentColor; stroke-width: 1.5; }
+
+.tl-carril.descartada { opacity: 0.45; }
+.tl-carril.descartada .tl-etiqueta { text-decoration: line-through; }
+
+.tl-revisar { fill: var(--ambar); color: var(--ambar); }
+
+/* Seleccionada: la que está abierta en el panel. */
+.tl-seleccionada .tl-fila { fill: color-mix(in srgb, var(--verde2) 14%, transparent); }
+.tl-seleccionada .tl-barra { stroke: var(--verde); stroke-width: 2; }
+.tl-seleccionada .tl-etiqueta { font-weight: 600; }
+
+/* Dependencias al pasar el ratón o enfocar: lo demás se apaga y las
+   relacionadas se contornean. Sin flechas permanentes (ver ESTILO.md). */
+.tl-relacionando .tl-carril { opacity: 0.3; transition: opacity 0.12s; }
+.tl-relacionando .tl-carril.tl-foco,
+.tl-relacionando .tl-carril.tl-depende,
+.tl-relacionando .tl-carril.tl-bloquea { opacity: 1; }
+.tl-depende .tl-barra { stroke: var(--text); stroke-width: 2; }
+.tl-bloquea .tl-barra { stroke: var(--text); stroke-width: 2; stroke-dasharray: 4 3; }
+
+.tl-herramientas {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem 1.2rem;
+}
+
+.tl-herramientas .nota { flex: 1 1 28rem; }
+.tl-herramientas .casilla { white-space: nowrap; }
+
 .tl-vacio {
   margin: 0.6rem 0 0;
   color: var(--dim);
@@ -535,6 +577,17 @@ footer .bien { color: var(--verde); }
 .leyenda .t-retro { color: var(--ambar); }
 .leyenda .t-workshop { color: var(--dim); }
 .leyenda .e-abierta { color: color-mix(in srgb, var(--dim) 70%, var(--text)); }
+.leyenda .descartada { color: var(--dim); opacity: 0.45; }
+.leyenda .c {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: transparent;
+  border: 1.5px solid currentColor;
+}
+.leyenda .r { width: 16px; height: 8px; border-radius: 4px; background: transparent; }
+.leyenda .r.depende { border: 2px solid var(--text); }
+.leyenda .r.bloquea { border: 2px dashed var(--text); }
 
 /* --- Métricas --- */
 
@@ -1337,3 +1390,302 @@ a.fuente:hover { border-color: color-mix(in srgb, var(--verde) 45%, var(--line))
   .fuente .clase { grid-column: 2; }
   .fuente .donde { grid-column: 1 / -1; }
 }
+
+/* --- Panel de acción (I6a) ------------------------------------------------ */
+
+/* Un <aside> fijo a la derecha, no un modal: no hay velo ni trampa de foco,
+   porque las correcciones se deciden mirando el timeline de detrás. */
+.panel-accion {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
+  width: min(28rem, 100vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  box-shadow: var(--sombra-panel);
+}
+
+/* `display: flex` le gana al atributo `hidden` del navegador. */
+.panel-accion[hidden] { display: none; }
+
+/* Con sitio de sobra, el panel empuja la página en vez de taparla. */
+@media (min-width: 80rem) {
+  body.con-panel { padding-right: 28rem; }
+}
+
+.pa-cabecera {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.8rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.pa-cabecera h2 { flex: 1; margin: 0; font-size: 1rem; font-weight: 600; }
+/* El título recibe el foco al abrir (para lectores de pantalla), pero no es un
+   control: sin anillo. */
+.pa-cabecera h2:focus-visible { box-shadow: none; }
+.pa-cabecera h2 code { font-family: var(--mono); font-size: 0.85em; color: var(--dim); }
+
+.pa-cerrar {
+  background: transparent;
+  color: var(--dim);
+  font-size: 1.3rem;
+  line-height: 1;
+  padding: 0.2rem 0.55rem;
+}
+
+.pa-cerrar:hover { color: var(--text); background: var(--panel2); }
+
+.pa-mensaje { padding: 0.6rem 1rem 0; }
+.pa-mensaje:empty { display: none; }
+.pa-mensaje .pa-nota { margin: 0; }
+
+.pa-cuerpo {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.4rem 1rem 1.5rem;
+}
+
+.panel-accion[aria-busy="true"] .pa-cuerpo { opacity: 0.6; pointer-events: none; }
+
+.pa-seccion {
+  padding: 0.85rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.pa-seccion h3 {
+  margin: 0 0 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--dim);
+}
+
+.pa-seccion h3 .tenue { text-transform: none; letter-spacing: 0; font-weight: 400; }
+
+.pa-seccion h4 {
+  margin: 0.8rem 0 0.4rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--dim);
+}
+
+.pa-descripcion { margin: 0; font-size: 1rem; font-weight: 500; line-height: 1.45; }
+
+.pa-ficha .meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.45rem;
+}
+
+.pa-ficha > .tenue { margin: 0.5rem 0 0; font-size: 0.84rem; }
+.pa-ficha > p:last-child { margin: 0.7rem 0 0; }
+
+.chip.manual {
+  color: var(--azul);
+  border-color: color-mix(in srgb, var(--azul) 40%, transparent);
+}
+
+.pa-nota {
+  margin: 0.55rem 0 0;
+  padding: 0.55rem 0.7rem;
+  border-radius: var(--radio-s);
+  border: 1px solid var(--line);
+  background: var(--panel2);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.pa-nota code { font-family: var(--mono); font-size: 0.9em; }
+.pa-nota.tenue { border: none; background: none; padding: 0.8rem 0 0; color: var(--dim); }
+
+.pa-nota.aviso-ambar {
+  border-color: color-mix(in srgb, var(--ambar) 45%, transparent);
+  background: color-mix(in srgb, var(--ambar) 8%, var(--panel));
+}
+
+.pa-nota.error {
+  color: var(--rojo);
+  border-color: color-mix(in srgb, var(--rojo) 45%, transparent);
+  background: color-mix(in srgb, var(--rojo) 8%, var(--panel));
+}
+
+.pa-nota.bien {
+  border-color: color-mix(in srgb, var(--verde) 40%, transparent);
+  background: color-mix(in srgb, var(--verde) 8%, var(--panel));
+}
+
+.pa-form { display: grid; gap: 0.7rem; }
+
+.pa-campo { display: grid; gap: 0.3rem; font-size: 0.84rem; }
+
+.pa-campo > span {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--dim);
+}
+
+.pa-campo small { font-size: 0.75rem; }
+
+.panel-accion textarea,
+.panel-accion input:not([type="radio"]),
+.panel-accion select { width: 100%; }
+
+.panel-accion textarea {
+  font: inherit;
+  padding: 0.42rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radio-s);
+  background: var(--panel2);
+  color: var(--text);
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.panel-accion input[type="radio"] { accent-color: var(--verde2); }
+.panel-accion :disabled { cursor: not-allowed; opacity: 0.55; }
+
+.pa-botones { display: flex; flex-wrap: wrap; gap: 0.45rem; margin-top: 0.4rem; }
+
+/* Jerarquía de botones del panel: principal relleno verde, secundario
+   fantasma y un único rojo, Descartar (--peligro). */
+.panel-accion .primario {
+  background: var(--verde2);
+  color: var(--sobre-acento);
+  font-weight: 600;
+}
+
+.panel-accion .primario:hover:not(:disabled) { background: var(--verde); }
+
+.panel-accion .secundario,
+.panel-accion .mini,
+.panel-accion a.boton {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--text);
+}
+
+.panel-accion .secundario:hover:not(:disabled),
+.panel-accion .mini:hover:not(:disabled),
+.panel-accion a.boton:hover { border-color: var(--verde2); }
+
+.panel-accion a.boton {
+  display: inline-block;
+  padding: 0.35rem 0.7rem;
+  border-radius: var(--radio-s);
+  font-size: 0.85rem;
+  text-decoration: none;
+}
+
+.panel-accion .peligro {
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--peligro) 55%, transparent);
+  color: var(--peligro);
+}
+
+.panel-accion .peligro:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--peligro) 12%, transparent);
+}
+
+.panel-accion .mini { padding: 0.12rem 0.5rem; font-size: 0.76rem; margin-left: auto; }
+
+.panel-accion .enlace {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--azul);
+  font-weight: 400;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--azul) 40%, transparent);
+  text-underline-offset: 2px;
+}
+
+.pa-lista { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.45rem; }
+
+.pa-lista > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.45rem;
+  font-size: 0.84rem;
+}
+
+.pa-lista .comentario {
+  flex-basis: 100%;
+  margin: 0.1rem 0 0;
+  padding-left: 0.6rem;
+  border-left: 2px solid var(--azul2);
+  color: var(--dim);
+  font-size: 0.8rem;
+}
+
+.pa-historial > li { display: block; padding: 0.4rem 0; border-bottom: 1px dashed var(--line); }
+.pa-historial > li:last-child { border-bottom: none; }
+.pa-historial > li .tenue { font-size: 0.74rem; font-family: var(--mono); }
+.pa-historial > li .mini { margin: 0.3rem 0 0; }
+.pa-historial > li.deshecha > div:first-child { text-decoration: line-through; color: var(--dim); }
+
+.pa-buscar { margin-top: 0.5rem; }
+
+.pa-candidatas { list-style: none; margin: 0.35rem 0 0; padding: 0; display: grid; gap: 0.3rem; }
+.pa-candidatas:empty { display: none; }
+.pa-candidatas .vacio,
+.pa-candidatas .error { font-size: 0.8rem; padding: 0.3rem 0; }
+
+.candidata {
+  display: grid;
+  gap: 0.1rem;
+  width: 100%;
+  text-align: left;
+  font-weight: 400;
+  font-size: 0.84rem;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+}
+
+.candidata:hover { border-color: var(--verde2); }
+.candidata .tenue { font-size: 0.74rem; }
+
+.pa-previa {
+  margin-top: 0.6rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid color-mix(in srgb, var(--verde2) 50%, var(--line));
+  border-radius: var(--radio-s);
+  font-size: 0.84rem;
+}
+
+.pa-previa p { margin: 0 0 0.45rem; }
+
+.pa-opcion {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  margin-bottom: 0.4rem;
+  cursor: pointer;
+}
+
+.pa-opcion input { margin-top: 0.25rem; }
+.pa-opcion .tenue { display: block; font-size: 0.75rem; }
+
+/* La descripción de una tarjeta abre la ficha: es un botón con aspecto de
+   texto, para no anidar controles dentro de un elemento pulsable. */
+.accion .abrir-ficha {
+  all: unset;
+  cursor: pointer;
+  border-radius: var(--radio-s);
+}
+
+.accion .abrir-ficha:hover { color: var(--verde); }
+.accion .abrir-ficha:focus-visible { box-shadow: var(--foco); }
+.acciones.tablero > li.seleccionada { border-color: var(--verde2); }
+.accion.seleccionada .abrir-ficha { color: var(--verde); font-weight: 600; }

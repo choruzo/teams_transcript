@@ -13,6 +13,12 @@ import { api } from "./api.js";
 import { iniciarTema } from "./tema.js";
 import { escapar, plural } from "./formato.js";
 import { dibujarReunion } from "./vistas/reunion.js";
+import {
+  abrirDesdeTarjetas,
+  botonDeTarjeta,
+  crearPanel,
+  marcarTarjeta,
+} from "./vistas/panel_accion.js";
 import { dibujarTranscripcion, irAlSegmento } from "./vistas/transcripcion.js";
 import { pintarSalud } from "./vistas/salud.js";
 import { iniciarAtajoDeBusqueda } from "./buscador.js";
@@ -24,6 +30,24 @@ const $ = (selector) => document.querySelector(selector);
 const cargados = { segmentos: [], total: 0, con_tiempos: false };
 
 const uidDeLaUrl = () => new URLSearchParams(window.location.search).get("uid");
+
+// Las acciones de la reunión abren la misma ficha que el timeline (I6a). Tras
+// corregir se repinta solo la ficha de la reunión, no la transcripción.
+const panel = crearPanel({
+  alCambiar: () => repintarReunion(),
+  alSeleccionar: (uid) => marcarTarjeta($("#reunion"), uid),
+  elementoDe: (uid) => botonDeTarjeta($("#reunion"), uid),
+});
+abrirDesdeTarjetas($("#reunion"), panel);
+
+async function repintarReunion() {
+  try {
+    dibujarReunion($("#reunion"), await api.reunion(uidDeLaUrl()));
+    marcarTarjeta($("#reunion"), panel.abierta());
+  } catch (error) {
+    pintarError("#reunion", error.message);
+  }
+}
 
 /** El `#s-12` de la URL, si lo hay: el ancla de una cita a un segmento. */
 function segmentoDelAncla() {

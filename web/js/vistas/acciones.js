@@ -6,9 +6,8 @@
 // color de «bloqueada»— cambiaría en un sitio y no en el otro, y el mismo dato
 // se leería distinto según por dónde se llegara.
 //
-// El tablero es **solo lectura**: cambiar estados, reasignar o fusionar es la
-// fase I6, y hacerlo antes de que exista la tabla `overrides` significaría que
-// la siguiente pasada del LLM se lleva la corrección por delante.
+// La tarjeta no edita nada: su descripción es un botón que abre la ficha en el
+// panel lateral (`vistas/panel_accion.js`, I6a), el mismo en las tres páginas.
 
 import { escapar, fechaCorta, nombreEstado, plural } from "../formato.js";
 import { urlReunion } from "../enlaces.js";
@@ -29,6 +28,12 @@ export function marcasDeAccion(a) {
   if (a.estancada) marcas.push(chip("ESTANCADA", "s-alta"));
   return marcas;
 }
+
+/** `revisar` en una tarjeta: el modelo ya no la encontró al reprocesar. */
+const marcaRevisar = (a) =>
+  a.revisar
+    ? `<span class="chip s-media" title="Al reprocesar su reunión el modelo ya no la encontró">revisar</span>`
+    : "";
 
 /** «Daily del 3 sep», o solo la fecha si esa reunión no tiene título. */
 function nombreReunion(fecha, titulo) {
@@ -80,11 +85,13 @@ export function tarjetaAccion(a, { uidActual = null, dias = false } = {}) {
   if (a.cerrada_en) detalle.push(`cerrada el ${escapar(fechaCorta(a.cerrada_en))}`);
 
   return `
-    <li class="accion">
-      <p class="descripcion">${escapar(a.descripcion)}</p>
+    <li class="accion" data-accion="${escapar(a.uid)}">
+      <p class="descripcion"><button type="button" class="abrir-ficha"
+          data-abrir-ficha="${escapar(a.uid)}" title="Abrir la ficha">${escapar(a.descripcion)}</button></p>
       <div class="meta">
         <span class="persona">${escapar(a.persona || "sin responsable")}</span>
         ${marcasDeAccion(a).join("")}
+        ${marcaRevisar(a)}
       </div>
       ${a.comentario ? `<p class="comentario">${escapar(a.comentario)}</p>` : ""}
       ${detalle.length ? `<p class="tenue">${detalle.join(" · ")}</p>` : ""}

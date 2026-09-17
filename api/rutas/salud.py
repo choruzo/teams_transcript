@@ -22,6 +22,7 @@ def salud() -> Salud:
     base = Salud(
         version=VERSION,
         solo_lectura=solo_lectura(),
+        escritura=not solo_lectura(),
         base_de_datos=str(path),
         base_accesible=False,
         esquema_esperado=memoria.ESQUEMA_VERSION,

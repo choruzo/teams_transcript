@@ -77,9 +77,14 @@
 
     <section class="bloque" aria-labelledby="t-timeline">
       <h2 id="t-timeline">Reuniones y acciones</h2>
-      <p class="nota">Cada marca es una reunión, con la altura proporcional a su
-        duración. Debajo, cada acción abierta como un tramo entre la reunión
-        donde nació y la última que la mencionó.</p>
+      <div class="tl-herramientas">
+        <p class="nota">Cada marca es una reunión, con la altura proporcional a su
+          duración. Debajo, cada acción abierta como un tramo entre su primera y
+          su última mención, con un punto en cada reunión que la tocó. Pulsa una
+          acción para ver su ficha y corregirla; al pasar por encima se resaltan
+          las acciones de las que depende y las que bloquea.</p>
+        <label class="casilla"><input type="checkbox" id="descartadas"> Ver descartadas</label>
+      </div>
       <div id="timeline" class="timeline">
         <div class="aviso">Cargando…</div>
       </div>
@@ -92,6 +97,11 @@
         <li><i class="b e-en_progreso"></i>en progreso</li>
         <li><i class="b e-bloqueada"></i>bloqueada</li>
         <li><i class="b estancada"></i>estancada</li>
+        <li><i class="b descartada"></i>descartada</li>
+        <li><i class="c"></i>mención</li>
+        <li><span class="tl-revisar">⚠</span>revisar</li>
+        <li><i class="r depende"></i>depende de</li>
+        <li><i class="r bloquea"></i>bloquea a</li>
       </ul>
     </section>
 

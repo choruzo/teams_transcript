@@ -6,15 +6,20 @@
 // pueda guardar o pegar en un chat, y la lista viene paginada del servidor, así
 // que ordenar y filtrar son peticiones y no un `sort` en el navegador.
 //
-// El tablero es de **solo lectura** (fase I3). Los botones para cambiar
-// estados, reasignar o fusionar duplicados llegan con la tabla `overrides` en
-// I6: sin ella, la siguiente pasada de `summarize_teams.py` borraría cualquier
-// corrección hecha aquí.
+// Pulsar la descripción de una acción abre su ficha en el panel lateral
+// (I6a), el mismo que en el timeline. Tras corregir, la lista se vuelve a
+// pedir con los mismos filtros sin navegar, para no cerrar el panel.
 
 import { api } from "./api.js";
 import { iniciarTema } from "./tema.js";
 import { escapar, plural } from "./formato.js";
 import { dibujarEstados, dibujarTablero } from "./vistas/acciones.js";
+import {
+  abrirDesdeTarjetas,
+  botonDeTarjeta,
+  crearPanel,
+  marcarTarjeta,
+} from "./vistas/panel_accion.js";
 import { pintarSalud } from "./vistas/salud.js";
 import { urlAcciones } from "./enlaces.js";
 import { iniciarAtajoDeBusqueda } from "./buscador.js";
@@ -129,8 +134,16 @@ function parametros(filtros, desplazamiento = 0) {
   };
 }
 
+const panel = crearPanel({
+  alCambiar: () => cargar({ conservar: true }),
+  alSeleccionar: (uid) => marcarTarjeta($("#tablero"), uid),
+  elementoDe: (uid) => botonDeTarjeta($("#tablero"), uid),
+});
+abrirDesdeTarjetas($("#tablero"), panel);
+
 function pintar(filtros) {
   dibujarTablero($("#tablero"), ultimo, cargadas);
+  marcarTarjeta($("#tablero"), panel.abierta());
   $("#total").textContent = ultimo.total
     ? plural(ultimo.total, "acción", "acciones")
     : "";
@@ -152,12 +165,21 @@ function pintar(filtros) {
   });
 }
 
-async function cargar() {
+/**
+ * `conservar`: tras una corrección, se vuelven a pedir tantas acciones como
+ * había cargadas y se mantiene la posición, en vez de volver a la primera
+ * página con un «Cargando…» que haría saltar la lista.
+ */
+async function cargar({ conservar = false } = {}) {
   const filtros = filtrosDeLaUrl();
   volcarEnElFormulario(filtros);
-  $("#tablero").innerHTML = '<div class="aviso">Cargando…</div>';
+  if (!conservar) $("#tablero").innerHTML = '<div class="aviso">Cargando…</div>';
+  const posicion = window.scrollY;
   try {
-    ultimo = await api.acciones(parametros(filtros));
+    ultimo = await api.acciones({
+      ...parametros(filtros),
+      limite: conservar ? Math.max(cargadas.length, 1) : undefined,
+    });
     cargadas = ultimo.acciones.slice();
   } catch (error) {
     pintarError("#tablero", error.message);
@@ -169,6 +191,7 @@ async function cargar() {
   volcarResponsables(ultimo, filtros.persona);
   $("#umbral").textContent = ultimo.umbral_estancamiento;
   pintar(filtros);
+  if (conservar) window.scrollTo(0, posicion);
 }
 
 // Un chip de estado alterna ese estado en el filtro. Es la versión honesta de

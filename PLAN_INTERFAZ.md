@@ -4,6 +4,7 @@ Redactado el 2026-09-08. **Fases D0, I0 e I1 implementadas** (2026-09-08) e
 **I2, I3, I4 e I5** (2026-09-09); el resto es propuesta. El 2026-09-16 I6 se
 parte en **I6a** (editar acciones desde el timeline) e **I6b** (hablantes,
 personas y glosario), y se añade **I11** (sugerencias de duplicados).
+**I6a implementada** el 2026-09-17 (sección 9 nonies).
 
 Documento complementario de [`PLAN_MEJORAS.md`](PLAN_MEJORAS.md). Aquel define
 el *motor* (glosario, JSON estructurado, SQLite, arrastres, consulta en
@@ -719,7 +720,7 @@ pendientes de decidir, y ninguna bloquea el arranque:
 | ~~4~~ | ~~**I3 — Tablero de acciones**~~ **hecha** | 3.4 en solo lectura, con badge de estancamiento | Bajo | I0 |
 | ~~5~~ | ~~**I4 — Búsqueda**~~ **hecha** | FTS5 con resaltado, atajo global de teclado | Bajo | I0 |
 | ~~6~~ | ~~**I5 — Chat**~~ **hecha** | 3.5 con SSE y citas navegables | Medio | **Fase 4 del motor (`ask_teams.py`)** |
-| 7 | **I6a — Editar acciones desde el timeline** | 3.6 bis: panel lateral, corregir, descartar, fusionar, dependencias, marcas intermedias en los carriles | **Alto** | I1, I3, **Fase 7 del motor** |
+| ~~7~~ | ~~**I6a — Editar acciones desde el timeline**~~ **hecha** | 3.6 bis: panel lateral, corregir, descartar, fusionar, dependencias, marcas intermedias en los carriles | **Alto** | I1, I3, **Fase 7 del motor** |
 | 7 bis | **I6b — Hablantes, personas y glosario** | el resto de 3.6; incluye los responsables compuestos (`Pedro / José Javier`) | Medio | I6a |
 | 8 | **I7 — Audio sincronizado** | reproductor de 3.3 | Bajo | I2 |
 | 9 | **I8 — Informes** | 3.2 ampliado + descarga de Markdown | Bajo | **Fase 5 del motor** |
@@ -1302,6 +1303,63 @@ constantes de `rag.py` —tamaño de ventana y presupuesto de caracteres— sigu
 esperando a que haya varias semanas acumuladas. Y la página del chat se ha
 visto en el navegador contra la base de demostración, no contra el servidor:
 allí solo se ha comprobado la API.
+
+## 9 nonies. Resultado de I6a (2026-09-17)
+
+Ficheros: `memoria.py` (esquema 4), `api/deps.py`, `api/modelos.py`,
+`api/rutas/acciones.py`, `api/rutas/personas.py` (nuevo), `api/rutas/metricas.py`,
+`api/rutas/salud.py`, `web/js/vistas/panel_accion.js` (nuevo),
+`web/js/vistas/timeline.js`, `web/js/vistas/acciones.js`, `web/js/app.js`,
+`web/js/acciones.js`, `web/js/reunion.js`, `web/js/api.js`, `web/index.html`,
+`web/acciones.html`, `web/css/tokens.css`, `web/css/estilo.css`; tests en
+`tests/test_correcciones.py` y `tests/test_api.py` (351 en total).
+
+Decisiones tomadas al implementar:
+
+1. **La `version` es una columna, no la huella de la fila** (esquema 4), y la
+   mantienen **triggers**: así sube también cuando reprocesa el pipeline, sin
+   tocar `summarize_teams.py`. Sube con lo que cambia la ficha —columnas
+   visibles, menciones (también las de la principal de una absorbida),
+   dependencias en los dos extremos y correcciones— y no con un `UPDATE` que
+   no cambia nada.
+2. **`If-Match: "<uid>:<version>"`**, no solo la versión: el panel de una
+   acción opera sobre otras (separar una absorbida desde la principal, quitar
+   un «bloquea a», fusionar desde la duplicada). El uid tiene que ser de una
+   de las implicadas (422 si no). Sin cabecera, **428**; versión vieja,
+   **409** con la actual. La comprobación y la escritura van en la misma
+   transacción (`BEGIN IMMEDIATE` en `memoria.comprobando_version`).
+3. **La conexión de escritura no migra** (`conectar(migrar=False)`): una base
+   atrasada da el mismo 503 que la de lectura.
+4. **Copias: 7 días** (`TEAMS_COPIAS_DIAS`). Sin copia no se escribe.
+5. **Deshacer tiene endpoint** (`POST /acciones/{uid}/correcciones/{id}/deshacer`),
+   que la tabla de la sección 4 no listaba: es la única forma de quitar la
+   protección de una acción corregida por error. Solo la última vigente de
+   cada campo (`deshacible` en la ficha), y la corrección tiene que ser de ese
+   `uid`.
+6. **La confirmación de cambios sin guardar es un aviso dentro del panel**, no
+   `confirm()`.
+7. **Principal preseleccionada al fusionar**: la de primera mención más
+   antigua; si empatan, la que se está mirando. La vista previa cuenta
+   **reuniones distintas**, no filas de menciones.
+8. **Dependencias al pasar el ratón**: la relacionada de la que depende se
+   contornea continuo y la que bloquea discontinuo; el resto se atenúa.
+9. **Accesibilidad**: el SVG de carriles pasa de `role="img"` a
+   `role="group"`; con `img` los carriles-botón eran invisibles para un lector
+   de pantalla. Las tarjetas del tablero y de la reunión abren la ficha desde
+   un botón en la descripción, no haciendo pulsable la tarjeta entera, que
+   contiene enlaces.
+
+**Verificado en el navegador** contra la base local (migrada de 2 a 4):
+corregir el responsable de una acción de `equipo`, fusionar las dos de ULS
+(el carril queda «×2 · 1 fusionada» y las menciones indican «vía»), marcar
+«Hablar con Diego» como dependiente de «Cerrar GCS4-1» (resaltado al pasar
+por encima), descartar otra (desaparece, las métricas bajan de 24 a 22 y con
+«Ver descartadas» sale tachada), un 409 provocado desde otra petición, la vista
+de reunión, el tablero en tema claro y el modo solo lectura a 420 px.
+
+**Pendiente del criterio de aceptación:** reprocesar las dos dailys en el
+servidor y comprobar que las cuatro correcciones sobreviven. El motor lo tiene
+cubierto con tests (Fase 7), pero no se ha hecho sobre la base real.
 
 ---
 

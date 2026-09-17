@@ -41,6 +41,12 @@ class Salud(BaseModel):
 
     version: str
     solo_lectura: bool
+    escritura: bool = Field(
+        description=(
+            "Si las rutas de correccion (I6a) aceptan escrituras; el panel lo "
+            "consulta para no tener que intentar un PATCH"
+        )
+    )
     base_de_datos: str
     base_accesible: bool
     detalle: str | None = None
@@ -117,14 +123,21 @@ class Metricas(BaseModel):
     riesgos: Riesgos
 
 
-class Carril(BaseModel):
-    """Una accion como tramo entre la reunion que la creo y la ultima que la cito.
+class MarcaDeCarril(BaseModel):
+    reunion_uid: str
+    fecha: str
 
-    No hay marcas intermedias porque la base no las guarda (D10): solo el
-    contador `menciones` y la ultima reunion.
+
+class Carril(BaseModel):
+    """Una accion como tramo entre su primera y su ultima mencion.
+
+    Desde el esquema 3 cada mencion es una marca (`marcas`), incluidas las de
+    las acciones absorbidas; por eso el tramo empieza en `primera_fecha`, que
+    puede ser anterior a `origen_fecha` tras una fusion.
     """
 
     id: int
+    uid: str
     descripcion: str
     persona: str | None = None
     estado: str
@@ -134,6 +147,13 @@ class Carril(BaseModel):
     origen_fecha: str
     ultima_uid: str
     ultima_fecha: str
+    primera_fecha: str
+    revisar: bool = False
+    descartada: bool = False
+    absorbidas: int = 0
+    marcas: list[MarcaDeCarril] = Field(default_factory=list)
+    depende_de: list[str] = Field(default_factory=list, description="uid")
+    bloquea_a: list[str] = Field(default_factory=list, description="uid")
 
 
 class Timeline(BaseModel):
@@ -191,11 +211,13 @@ class Accion(BaseModel):
     """
 
     id: int
+    uid: str = Field(description="Identidad estable de la accion (I6a)")
     descripcion: str
     persona: str | None = None
     estado: str
     menciones: int
     estancada: bool
+    revisar: bool = False
     cerrada_en: str | None = None
     origen_uid: str
     origen_fecha: str
@@ -336,6 +358,118 @@ class PaginaDeAcciones(BaseModel):
     por_estado: dict[str, int]
     responsables: list[Responsable]
     acciones: list[AccionTablero]
+
+
+# --------------------------------------------------------------------------
+# I6a: correccion de acciones
+# --------------------------------------------------------------------------
+
+
+class AccionRelacionada(BaseModel):
+    uid: str
+    descripcion: str
+    estado: str
+    creado_en: str | None = None
+
+
+class AccionAbsorbida(BaseModel):
+    uid: str
+    descripcion: str
+    estado: str
+    version: int
+
+
+class MencionDeAccion(BaseModel):
+    reunion_uid: str
+    fecha: str
+    titulo: str | None = None
+    estado: str
+    comentario: str | None = None
+    accion_uid: str = Field(
+        description="La accion que recibio la mencion: la propia o una absorbida"
+    )
+
+
+class Correccion(BaseModel):
+    id: int
+    campo: str
+    valor_anterior: str | None = None
+    valor_nuevo: str | None = None
+    origen: str
+    creado_en: str
+    deshecha_en: str | None = None
+    deshacible: bool = Field(
+        description="Si es la ultima vigente de su campo (las demas no se deshacen)"
+    )
+
+
+class FichaAccion(BaseModel):
+    """`memoria.detalle_accion`: tambien de una descartada o absorbida.
+
+    `version` es la de la concurrencia optimista: cada escritura la devuelve
+    en la cabecera `If-Match` y recibe un 409 si ha cambiado. Va tambien como
+    `ETag` de la respuesta.
+    """
+
+    uid: str
+    version: int
+    descripcion: str
+    descripcion_llm: str | None = None
+    persona: str | None = None
+    estado: str
+    menciones: int
+    estancada: bool
+    revisar: bool
+    cerrada_en: str | None = None
+    descartada_en: str | None = None
+    motivo_descarte: str | None = None
+    absorbida_por: str | None = None
+    absorbida_por_descripcion: str | None = None
+    corregida: list[str] = Field(
+        description="Campos con una correccion humana vigente"
+    )
+    origen_uid: str
+    origen_fecha: str
+    origen_titulo: str | None = None
+    ultima_uid: str
+    ultima_fecha: str
+    ultima_titulo: str | None = None
+    absorbidas: list[AccionAbsorbida]
+    menciones_detalle: list[MencionDeAccion]
+    depende_de: list[AccionRelacionada]
+    bloquea_a: list[AccionRelacionada]
+    correcciones: list[Correccion]
+    avisos: list[str] = Field(
+        default_factory=list,
+        description="Lo que se ha permitido pero conviene saber (cerrar con dependencias abiertas)",
+    )
+
+
+class CambiosDeAccion(BaseModel):
+    """Cuerpo de `PATCH /api/acciones/{uid}`: solo cambia lo que se envia.
+
+    `persona` a `null` o `""` la deja sin responsable, que es distinto de no
+    enviarla.
+    """
+
+    descripcion: str | None = Field(None, max_length=2000)
+    persona: str | None = Field(None, max_length=200)
+    estado: str | None = None
+
+
+class Descarte(BaseModel):
+    motivo: str | None = Field(None, max_length=500)
+
+
+class Fusion(BaseModel):
+    duplicada_uid: str
+
+
+class Persona(BaseModel):
+    nombre: str
+    alias: list[str]
+    activo: bool
+    acciones: int = Field(description="Acciones vigentes de las que es responsable")
 
 
 # --------------------------------------------------------------------------

@@ -55,6 +55,9 @@ def obtener_timeline(
     solo_abiertas: bool = Query(
         True, description="Carriles solo de acciones sin cerrar"
     ),
+    descartadas: bool = Query(
+        False, description="Incluir las acciones descartadas (se pintan atenuadas)"
+    ),
 ) -> Timeline:
     _validar_tipo(tipo)
     filtros = {"desde": desde, "hasta": hasta, "tipo": tipo}
@@ -65,6 +68,7 @@ def obtener_timeline(
         desde=desde,
         hasta=hasta,
         solo_abiertas=solo_abiertas,
+        incluir_descartadas=descartadas,
         limite=TOPE_CARRILES + 1,
     )
     truncado = total > TOPE_REUNIONES or len(carriles) > TOPE_CARRILES
@@ -74,7 +78,7 @@ def obtener_timeline(
         # El timeline dibuja de izquierda (antiguo) a derecha (reciente);
         # `listar_reuniones` devuelve al reves, que es lo que quiere un listado.
         reuniones=[a_modelo(fila) for fila in reversed(reuniones)],
-        carriles=[Carril(**dict(fila)) for fila in carriles[:TOPE_CARRILES]],
+        carriles=[Carril(**carril) for carril in carriles[:TOPE_CARRILES]],
         total_reuniones=total,
         truncado=truncado,
     )

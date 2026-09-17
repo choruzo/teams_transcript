@@ -216,6 +216,31 @@ La quinta página (`chat.html`). Lo propio de esta vista:
 - El compositor hereda la jerarquía de botones de `.filtros` (submit relleno,
   `button` fantasma) sin clases propias, como manda la sección de formularios.
 
+## Panel de acción (I6a)
+
+`js/vistas/panel_accion.js`, compartido por el timeline, el tablero y la vista
+de reunión.
+
+- **Un `<aside>` fijo a la derecha, no un modal**: sin velo ni trampa de foco,
+  separado por `--sombra-panel`. Con 80rem o más empuja la página
+  (`body.con-panel`); por debajo la tapa. `Esc` cierra y devuelve el foco a lo
+  que lo abrió.
+- **Jerarquía de botones propia** (`.primario`, `.secundario`, `.mini`,
+  `.enlace`): el panel no es un `.filtros`. **Descartar es el único botón
+  rojo** y usa `--peligro`, alias de `--rojo`.
+- **Estados de la ficha**: `corregida a mano` en azul (`.chip.manual`),
+  `revisar` en ámbar, `descartada` tachada. Mensajes en `.pa-nota` con
+  `.bien`, `.aviso-ambar` (409, cambios sin guardar, avisos del motor) y
+  `.error`.
+- **En solo lectura** todo se pinta igual pero desactivado, con una nota que
+  dice qué variable cambiar: la ficha, las menciones y el historial son útiles
+  sin poder escribir.
+- **En los carriles**: punto hueco por mención intermedia, `⚠` ámbar para
+  `revisar`, descartadas al 45 % y tachadas, la seleccionada con fondo verde
+  tenue, y al pasar por encima las dependencias contorneadas (continuo «depende
+  de», discontinuo «bloquea a») con el resto atenuado. Sin flechas
+  permanentes. Toda la fila es el blanco de clic (`.tl-fila`).
+
 ## Decir lo que el dato soporta
 
 La interfaz no promete más de lo que hay en la base: los riesgos son

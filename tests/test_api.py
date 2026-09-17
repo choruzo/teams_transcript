@@ -1035,6 +1035,223 @@ class TestFrontEstatico(BaseAPI):
     def test_favicon_no_lo_eclipsa_el_montaje_estatico(self):
         self.assertEqual(self.cliente.get("/favicon.ico").status_code, 200)
 
+    def test_el_panel_de_accion_se_sirve(self):
+        respuesta = self.cliente.get("/js/vistas/panel_accion.js")
+        self.assertEqual(respuesta.status_code, 200)
+
+
+class TestEscrituraDeAcciones(BaseAPI):
+    """Las rutas de correccion de I6a sobre el motor de la Fase 7."""
+
+    def setUp(self):
+        super().setUp()
+        self._lectura_previa = os.environ.get("TEAMS_API_SOLO_LECTURA")
+        os.environ["TEAMS_API_SOLO_LECTURA"] = "0"
+        self.addCleanup(self._restaurar_lectura)
+        conn = memoria.conectar(self.db)
+        lunes = memoria.crear_reunion(
+            conn, fecha="2026-09-07", transcript_path="/datos/lunes.txt"
+        )
+        memoria.reconciliar_acciones(
+            conn,
+            lunes,
+            [
+                {"descripcion": "Seguir con ULS", "persona": "Javi"},
+                {"descripcion": "Cerrar GCS4-1", "persona": "Pedro"},
+                {"descripcion": "Revisar la wiki", "persona": "equipo"},
+            ],
+        )
+        jueves = memoria.crear_reunion(
+            conn, fecha="2026-09-10", transcript_path="/datos/jueves.txt"
+        )
+        memoria.reconciliar_acciones(
+            conn, jueves, [{"descripcion": "Estabilizar ULS", "persona": "Javi"}]
+        )
+        conn.commit()
+        self.uls, self.gcs, self.wiki = [
+            f[0] for f in conn.execute(
+                "SELECT uid FROM actions WHERE meeting_id_origen = ? ORDER BY id", (lunes,)
+            )
+        ]
+        self.uls2 = conn.execute(
+            "SELECT uid FROM actions WHERE meeting_id_origen = ?", (jueves,)
+        ).fetchone()[0]
+        conn.close()
+
+    def _restaurar_lectura(self):
+        if self._lectura_previa is None:
+            os.environ.pop("TEAMS_API_SOLO_LECTURA", None)
+        else:
+            os.environ["TEAMS_API_SOLO_LECTURA"] = self._lectura_previa
+
+    def etag(self, uid):
+        respuesta = self.cliente.get(f"/api/acciones/{uid}")
+        self.assertEqual(respuesta.status_code, 200, respuesta.text)
+        return respuesta.headers["etag"]
+
+    def test_ficha_con_etag(self):
+        respuesta = self.cliente.get(f"/api/acciones/{self.uls}")
+        datos = respuesta.json()
+        self.assertEqual(respuesta.headers["etag"], f'"{self.uls}:{datos["version"]}"')
+        self.assertEqual(datos["persona"], "Javi")
+        self.assertEqual(self.cliente.get("/api/acciones/no-existe").status_code, 404)
+
+    def test_corregir_y_deshacer(self):
+        respuesta = self.cliente.patch(
+            f"/api/acciones/{self.wiki}",
+            json={"persona": "Ana", "estado": "en_progreso"},
+            headers={"If-Match": self.etag(self.wiki)},
+        )
+        self.assertEqual(respuesta.status_code, 200, respuesta.text)
+        ficha = respuesta.json()
+        self.assertEqual((ficha["persona"], ficha["estado"]), ("Ana", "en_progreso"))
+        self.assertEqual(ficha["corregida"], ["estado", "persona"])
+        self.assertIn("Ana", [p["nombre"] for p in self.cliente.get("/api/personas").json()])
+
+        correccion = next(c for c in ficha["correcciones"] if c["campo"] == "persona")
+        respuesta = self.cliente.post(
+            f"/api/acciones/{self.wiki}/correcciones/{correccion['id']}/deshacer",
+            headers={"If-Match": respuesta.headers["etag"]},
+        )
+        self.assertEqual(respuesta.status_code, 200, respuesta.text)
+        self.assertEqual(respuesta.json()["persona"], "equipo")
+
+    def test_persona_vacia_quita_el_responsable(self):
+        respuesta = self.cliente.patch(
+            f"/api/acciones/{self.wiki}",
+            json={"persona": None},
+            headers={"If-Match": self.etag(self.wiki)},
+        )
+        self.assertEqual(respuesta.status_code, 200, respuesta.text)
+        self.assertIsNone(respuesta.json()["persona"])
+
+    def test_version_obsoleta_da_409_y_no_escribe(self):
+        vieja = self.etag(self.gcs)
+        self.cliente.patch(
+            f"/api/acciones/{self.gcs}", json={"estado": "bloqueada"},
+            headers={"If-Match": vieja},
+        )
+        respuesta = self.cliente.patch(
+            f"/api/acciones/{self.gcs}", json={"estado": "completada"},
+            headers={"If-Match": vieja},
+        )
+        self.assertEqual(respuesta.status_code, 409)
+        self.assertIn("ha cambiado", respuesta.json()["detail"]["mensaje"])
+        self.assertEqual(
+            self.cliente.get(f"/api/acciones/{self.gcs}").json()["estado"], "bloqueada"
+        )
+
+    def test_sin_if_match_428_y_de_otra_accion_422(self):
+        respuesta = self.cliente.patch(f"/api/acciones/{self.gcs}", json={"estado": "bloqueada"})
+        self.assertEqual(respuesta.status_code, 428)
+        respuesta = self.cliente.patch(
+            f"/api/acciones/{self.gcs}", json={"estado": "bloqueada"},
+            headers={"If-Match": self.etag(self.wiki)},
+        )
+        self.assertEqual(respuesta.status_code, 422)
+
+    def test_descartar_restaurar_y_no_cuenta(self):
+        respuesta = self.cliente.post(
+            f"/api/acciones/{self.wiki}/descartar", json={"motivo": "no es una tarea"},
+            headers={"If-Match": self.etag(self.wiki)},
+        )
+        self.assertEqual(respuesta.status_code, 200, respuesta.text)
+        self.assertEqual(respuesta.json()["motivo_descarte"], "no es una tarea")
+        uids = [c["uid"] for c in self.cliente.get("/api/timeline").json()["carriles"]]
+        self.assertNotIn(self.wiki, uids)
+        con = self.cliente.get("/api/timeline", params={"descartadas": "true"}).json()
+        self.assertIn(self.wiki, [c["uid"] for c in con["carriles"] if c["descartada"]])
+
+        respuesta = self.cliente.post(
+            f"/api/acciones/{self.wiki}/restaurar", headers={"If-Match": respuesta.headers["etag"]}
+        )
+        self.assertEqual(respuesta.status_code, 200, respuesta.text)
+        self.assertIsNone(respuesta.json()["descartada_en"])
+
+    def test_fusionar_desde_la_duplicada_y_separar(self):
+        respuesta = self.cliente.post(
+            f"/api/acciones/{self.uls}/fusionar", json={"duplicada_uid": self.uls2},
+            headers={"If-Match": self.etag(self.uls2)},
+        )
+        self.assertEqual(respuesta.status_code, 200, respuesta.text)
+        self.assertEqual([a["uid"] for a in respuesta.json()["absorbidas"]], [self.uls2])
+        carril = next(
+            c for c in self.cliente.get("/api/timeline").json()["carriles"]
+            if c["uid"] == self.uls
+        )
+        self.assertEqual(carril["absorbidas"], 1)
+        self.assertEqual(len(carril["marcas"]), 2)
+
+        respuesta = self.cliente.post(
+            f"/api/acciones/{self.uls2}/separar", headers={"If-Match": respuesta.headers["etag"]}
+        )
+        self.assertEqual(respuesta.status_code, 200, respuesta.text)
+        self.assertIsNone(respuesta.json()["absorbida_por"])
+
+    def test_dependencias_y_ciclo_422(self):
+        respuesta = self.cliente.put(
+            f"/api/acciones/{self.uls}/dependencias/{self.gcs}",
+            headers={"If-Match": self.etag(self.uls)},
+        )
+        self.assertEqual(respuesta.status_code, 200, respuesta.text)
+        self.assertEqual([d["uid"] for d in respuesta.json()["depende_de"]], [self.gcs])
+
+        respuesta = self.cliente.put(
+            f"/api/acciones/{self.gcs}/dependencias/{self.uls}",
+            headers={"If-Match": self.etag(self.gcs)},
+        )
+        self.assertEqual(respuesta.status_code, 422)
+        self.assertIn("ciclo", respuesta.json()["detail"])
+
+        respuesta = self.cliente.delete(
+            f"/api/acciones/{self.uls}/dependencias/{self.gcs}",
+            headers={"If-Match": self.etag(self.gcs)},
+        )
+        self.assertEqual(respuesta.status_code, 200, respuesta.text)
+        self.assertEqual(respuesta.json()["depende_de"], [])
+
+    def test_estado_desconocido_422_con_el_mensaje_del_motor(self):
+        respuesta = self.cliente.patch(
+            f"/api/acciones/{self.gcs}", json={"estado": "hecha"},
+            headers={"If-Match": self.etag(self.gcs)},
+        )
+        self.assertEqual(respuesta.status_code, 422)
+        self.assertIn("Estado desconocido", respuesta.json()["detail"])
+
+    def test_copia_de_seguridad_antes_de_escribir(self):
+        copias = self.db.parent / "copias"
+        self.assertFalse(copias.exists())
+        self.cliente.patch(
+            f"/api/acciones/{self.gcs}", json={"estado": "bloqueada"},
+            headers={"If-Match": self.etag(self.gcs)},
+        )
+        self.assertEqual(len(list(copias.glob("meetings-*.db"))), 1)
+
+    def test_solo_lectura_403_pero_la_ficha_se_lee(self):
+        os.environ["TEAMS_API_SOLO_LECTURA"] = "1"
+        self.assertFalse(self.cliente.get("/api/salud").json()["escritura"])
+        etag = self.etag(self.gcs)
+        respuesta = self.cliente.patch(
+            f"/api/acciones/{self.gcs}", json={"estado": "bloqueada"},
+            headers={"If-Match": etag},
+        )
+        self.assertEqual(respuesta.status_code, 403)
+        self.assertIn("TEAMS_API_SOLO_LECTURA=0", respuesta.json()["detail"])
+
+    def test_base_atrasada_503_sin_migrarla(self):
+        cruda = sqlite3.connect(self.db)
+        cruda.execute("PRAGMA user_version = 3")
+        cruda.commit()
+        cruda.close()
+        respuesta = self.cliente.patch(
+            f"/api/acciones/{self.gcs}", json={"estado": "bloqueada"},
+            headers={"If-Match": f'"{self.gcs}:1"'},
+        )
+        self.assertEqual(respuesta.status_code, 503)
+        cruda = sqlite3.connect(self.db)
+        self.assertEqual(cruda.execute("PRAGMA user_version").fetchone()[0], 3)
+        cruda.close()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

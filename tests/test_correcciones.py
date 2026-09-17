@@ -55,10 +55,14 @@ class Base(unittest.TestCase):
         return self.fila(uid)["id"]
 
     def foto(self):
-        """Todo lo que una operacion y su deshacer deben dejar igual."""
+        """Todo lo que una operacion y su deshacer deben dejar igual.
+
+        Menos `actions.version`, que sube tambien al deshacer: es justo lo que
+        tiene que hacer para que un panel abierto antes se entere (I6a).
+        """
         return {
             tabla: [
-                tuple(f)
+                tuple(v for k, v in dict(f).items() if k != "version")
                 for f in self.conn.execute(f"SELECT * FROM {tabla} ORDER BY 1, 2")
             ]
             for tabla in ("actions", "action_mentions", "action_dependencias")
@@ -152,7 +156,7 @@ class TestMigracion(unittest.TestCase):
 
         conn = memoria.conectar(self.db)
         self.addCleanup(conn.close)
-        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], memoria.ESQUEMA_VERSION)
         filas = conn.execute("SELECT * FROM actions ORDER BY id").fetchall()
         self.assertEqual(
             [f["uid"] for f in filas], ["lunes-a1", "lunes-a2", "lunes-a3", "jueves-a1"]
@@ -196,7 +200,7 @@ class TestMigracion(unittest.TestCase):
 
         conn = memoria.conectar(self.db)
         self.addCleanup(conn.close)
-        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], memoria.ESQUEMA_VERSION)
         total, con_uid, sin_mencion = conn.execute(
             """
             SELECT count(*), count(uid),
@@ -601,6 +605,8 @@ class TestLecturasIgnoranDescartadasYAbsorbidas(Base):
         "deshacer_correccion",
         "fusionar_acciones",
         "detalle_accion",
+        # Con `incluir_descartadas` pinta las descartadas atenuadas (I6a).
+        "carriles_acciones",
     }
 
     def test_ninguna_lectura_nueva_de_la_tabla_actions(self):
@@ -658,6 +664,177 @@ class TestLecturasIgnoranDescartadasYAbsorbidas(Base):
             uids(memoria.acciones_cerradas(self.conn)), {self.banda},
             "la descartada no cuenta aunque este cerrada",
         )
+
+
+# --------------------------------------------------------------------------
+# I6a: version, copias, carriles y personas
+# --------------------------------------------------------------------------
+
+
+class TestVersion(Base):
+    """`actions.version` sube con todo lo que cambia la ficha, lo haga quien lo haga."""
+
+    def version(self, uid):
+        return self.fila(uid)["version"]
+
+    def test_sube_con_cada_operacion_y_con_el_reproceso(self):
+        self.poblar()
+        casos = [
+            (self.banda, lambda: memoria.corregir_accion(self.conn, self.banda, persona="Ana")),
+            (self.uls2, lambda: memoria.anadir_dependencia(self.conn, self.diego, self.uls2)),
+            (self.wiki, lambda: memoria.descartar_accion(self.conn, self.wiki, "no es tarea")),
+            (self.uls, lambda: memoria.fusionar_acciones(self.conn, self.uls, self.uls2)),
+        ]
+        for uid, operacion in casos:
+            with self.subTest(uid=uid):
+                antes = self.version(uid)
+                operacion()
+                self.assertGreater(self.version(uid), antes)
+
+        # El pipeline tambien: reprocesar el jueves toca las menciones del lunes.
+        antes = self.version(self.gcs)
+        self.procesar(
+            "jueves",
+            "2026-09-10",
+            [{"descripcion": "Hablar con Diego tras la entrega de GCS4-1", "persona": "Pedro"}],
+            [{"action_id": self.id_de(self.gcs), "estado": "bloqueada"}],
+        )
+        self.assertGreater(self.version(self.gcs), antes)
+
+    def test_no_sube_si_nada_cambia(self):
+        self.poblar()
+        antes = self.version(self.banda)
+        self.conn.execute(
+            "UPDATE actions SET estado = estado WHERE uid = ?", (self.banda,)
+        )
+        self.assertEqual(self.version(self.banda), antes)
+
+    def test_la_ficha_la_lleva(self):
+        self.poblar()
+        ficha = memoria.detalle_accion(self.conn, self.banda)
+        self.assertEqual(ficha["version"], self.version(self.banda))
+
+    def test_comprobando_version(self):
+        self.poblar()
+        vista = self.version(self.banda)
+        with memoria.comprobando_version(self.conn, self.banda, vista):
+            memoria.corregir_accion(self.conn, self.banda, estado="bloqueada")
+        self.assertEqual(self.fila(self.banda)["estado"], "bloqueada")
+
+        # Con la version de antes, nada se escribe.
+        with self.assertRaises(memoria.VersionObsoleta) as error:
+            with memoria.comprobando_version(self.conn, self.banda, vista):
+                memoria.corregir_accion(self.conn, self.banda, estado="completada")
+        self.assertEqual(error.exception.actual, self.version(self.banda))
+        self.assertEqual(self.fila(self.banda)["estado"], "bloqueada")
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_un_error_del_motor_deshace_la_transaccion(self):
+        self.poblar()
+        with self.assertRaises(memoria.CorreccionInvalida):
+            with memoria.comprobando_version(self.conn, self.banda, self.version(self.banda)):
+                memoria.anadir_dependencia(self.conn, self.banda, self.banda)
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_corregida_y_deshacible(self):
+        self.poblar()
+        memoria.corregir_accion(self.conn, self.banda, estado="bloqueada")
+        memoria.corregir_accion(self.conn, self.banda, estado="en_progreso")
+        ficha = memoria.detalle_accion(self.conn, self.banda)
+        self.assertEqual(ficha["corregida"], ["estado"])
+        self.assertEqual(
+            [c["deshacible"] for c in ficha["correcciones"]], [False, True],
+            "solo la ultima vigente de cada campo",
+        )
+
+    def test_migracion_3_a_4_anade_la_columna(self):
+        self.poblar()
+        self.conn.close()
+        cruda = sqlite3.connect(self.db)
+        for trigger in [f[0] for f in cruda.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE '%version%'"
+        )]:
+            cruda.execute(f"DROP TRIGGER {trigger}")
+        cruda.execute("ALTER TABLE actions DROP COLUMN version")
+        cruda.execute("PRAGMA user_version = 3")
+        cruda.commit()
+        cruda.close()
+
+        self.conn = memoria.conectar(self.db)
+        self.addCleanup(self.conn.close)
+        self.assertEqual(
+            self.conn.execute("PRAGMA user_version").fetchone()[0], memoria.ESQUEMA_VERSION
+        )
+        antes = self.version(self.banda)
+        memoria.corregir_accion(self.conn, self.banda, persona="Ana")
+        self.assertGreater(self.version(self.banda), antes)
+
+
+class TestCopiaDiaria(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.db = Path(self._tmp.name) / "meetings.db"
+        memoria.conectar(self.db).close()
+
+    def test_una_al_dia_y_se_podan_las_viejas(self):
+        copias = self.db.parent / "copias"
+        copias.mkdir()
+        vieja = copias / "meetings-20200101.db"
+        vieja.write_bytes(b"x")
+        ajena = copias / "otra-cosa.db"
+        ajena.write_bytes(b"x")
+
+        creada = memoria.copia_de_seguridad_diaria(self.db, dias=7)
+        self.assertIsNotNone(creada)
+        conn = sqlite3.connect(creada)
+        self.assertEqual(
+            conn.execute("PRAGMA user_version").fetchone()[0], memoria.ESQUEMA_VERSION
+        )
+        conn.close()
+        self.assertIsNone(memoria.copia_de_seguridad_diaria(self.db, dias=7))
+        self.assertFalse(vieja.exists())
+        self.assertTrue(ajena.exists(), "solo borra lo que tiene nombre de copia")
+
+
+class TestCarrilesI6a(Base):
+    def test_marcas_absorbidas_dependencias_y_descartadas(self):
+        self.poblar()
+        memoria.fusionar_acciones(self.conn, self.uls2, self.uls)
+        memoria.anadir_dependencia(self.conn, self.diego, self.gcs)
+        memoria.descartar_accion(self.conn, self.wiki)
+
+        carriles = {c["uid"]: c for c in memoria.carriles_acciones(self.conn)}
+        self.assertNotIn(self.uls, carriles, "la absorbida vive dentro de la principal")
+        self.assertNotIn(self.wiki, carriles)
+
+        principal = carriles[self.uls2]
+        self.assertEqual(principal["absorbidas"], 1)
+        self.assertEqual(
+            [m["fecha"] for m in principal["marcas"]], ["2026-09-07", "2026-09-10"]
+        )
+        self.assertEqual(principal["primera_fecha"], "2026-09-07", "abarca a la absorbida")
+        self.assertEqual(principal["origen_fecha"], "2026-09-10")
+        self.assertEqual(carriles[self.diego]["depende_de"], [self.gcs])
+        self.assertEqual(carriles[self.gcs]["bloquea_a"], [self.diego])
+
+        con = {c["uid"]: c for c in memoria.carriles_acciones(self.conn, incluir_descartadas=True)}
+        self.assertTrue(con[self.wiki]["descartada"])
+        self.assertNotIn(self.uls, con)
+
+        # El periodo se aplica al tramo entero, no al origen de la principal.
+        self.assertIn(
+            self.uls2,
+            {c["uid"] for c in memoria.carriles_acciones(self.conn, hasta="2026-09-08")},
+        )
+
+    def test_listar_personas(self):
+        self.poblar()
+        personas = {p["nombre"]: p for p in memoria.listar_personas(self.conn)}
+        self.assertEqual(personas["Javi"]["acciones"], 3)
+        memoria.descartar_accion(self.conn, self.banda)
+        personas = {p["nombre"]: p for p in memoria.listar_personas(self.conn)}
+        self.assertEqual(personas["Javi"]["acciones"], 2, "las descartadas no cuentan")
 
 
 if __name__ == "__main__":

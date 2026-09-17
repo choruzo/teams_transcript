@@ -263,6 +263,9 @@ class TestArrastresSiguenBien(BaseTemporal):
         self.assertEqual(procesar_dia2(), [accion], "y volver a ofrecerse al reprocesar")
         estado_2 = dict(conn.execute("SELECT * FROM actions").fetchone())
 
+        # `version` sube al reprocesar a proposito: un panel abierto tiene que
+        # enterarse de que el pipeline ha pasado por encima (I6a).
+        estado_1.pop("version"), estado_2.pop("version")
         self.assertEqual(estado_1, estado_2, "el reproceso debe ser idempotente")
         self.assertEqual(estado_2["menciones"], 2)
         self.assertEqual(estado_2["estado"], "bloqueada")

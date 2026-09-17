@@ -22,7 +22,15 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from api import VERSION  # noqa: E402
 from api.deps import directorio_web  # noqa: E402
-from api.rutas import acciones, busqueda, chat, metricas, reuniones, salud  # noqa: E402
+from api.rutas import (  # noqa: E402
+    acciones,
+    busqueda,
+    chat,
+    metricas,
+    personas,
+    reuniones,
+    salud,
+)
 
 app = FastAPI(
     title="Memoria del equipo",
@@ -37,6 +45,7 @@ api.include_router(salud.router, tags=["salud"])
 api.include_router(reuniones.router)
 api.include_router(metricas.router)
 api.include_router(acciones.router)
+api.include_router(personas.router)
 api.include_router(busqueda.router)
 api.include_router(chat.router)
 app.include_router(api)
