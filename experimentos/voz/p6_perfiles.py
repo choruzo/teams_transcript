@@ -39,8 +39,14 @@ def muestras():
         nombre, seg = max(((n, v) for n, v in segundos.items() if n), key=lambda x: x[1], default=(None, 0))
         if mic > 0.5:
             nombre, seg = "Javi", total  # mic.wav es etiqueta independiente
+        ruta_mapeo = comun.DATOS_VOZ / "mapeo" / f"{r}.json"
+        mapeo = json.loads(ruta_mapeo.read_text(encoding="utf-8")) if ruta_mapeo.exists() else {}
         motivo = None
-        if not nombre:
+        if (mapeo.get(cl) or {}).get("usar_en_perfil") is False:
+            # Etiqueta correcta pero voz atipica ese dia: vale para el dataset,
+            # no para el centroide, que queda guardado para siempre.
+            motivo = "excluido a mano del perfil"
+        elif not nombre:
             motivo = "sin nombre"
         elif nombre == "Javi" and mic <= 0.5:
             motivo = "la transcripcion dice Javi pero el micro no"

@@ -9,6 +9,11 @@ Se ejecuta en orden con `.venv\Scripts\python.exe experimentos\voz\<paso>.py`:
 5. `p5_asignar.py <reunion>` — pone nombre a cada línea del `.srt`/`.txt` según `datos/voz/mapeo/<reunion>.json` (cluster → persona). Guarda el `.srt` previo como `*_mixed.sin_hablantes.srt`.
 6. `p6_perfiles.py [--escribir]` — evalúa dejando una reunión fuera y regenera `datos/perfiles_voz.json`.
 7. `p7_revisar.py <reunion>` — tabla de revisión (voz frente a transcripción, con frases y minutos) sin modificar nada.
+8. `p8_retranscribir.py <reunion> --audio INI FIN --srt-desde A --srt-hasta B [--simular]` — vuelve a transcribir un tramo donde Whisper se atascó en un bucle y lo sustituye en `*_mixed.sin_hablantes.srt`; después, `p5_asignar.py`.
+
+En `datos/voz/mapeo/<reunion>.json`, `"usar_en_perfil": false` deja un hablante validado fuera de `perfiles_voz.json` (voz atípica ese día) sin quitarlo del dataset.
+
+Los pasos que usan GPU (`p1`, `p3`, `p8` y la transcripción) se ejecutan de uno en uno: Whisper large-v3 y los embeddings a la vez no caben en 16 GB.
 
 Estado, objetivos y cómo añadir una reunión: `SESION_2026-09-17.md`.
 
