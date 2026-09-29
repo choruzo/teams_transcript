@@ -7,6 +7,24 @@ adelante con el motor que prefieras (Whisper, Azure Speech, etc.).
 > ⚠️ **Aviso legal:** graba una reunión o llamada solo si cuentas con el
 > consentimiento de todos los participantes, según la normativa que te aplique.
 
+## Interfaz web
+
+Las reuniones procesadas se consultan desde una web local (FastAPI + páginas
+estáticas, `docker compose up -d` → http://127.0.0.1:8080). Las capturas usan
+una base de **demostración con datos ficticios**: el equipo, el proyecto y las
+conversaciones son inventados.
+
+![Inicio: timeline de reuniones y carriles de acciones](capturas/00_portada.png)
+
+| | |
+|---|---|
+| ![Vista de un workshop](capturas/02_reunion_workshop.png)<br>**Reunión**: resumen, acciones, secciones propias del tipo y transcripción con hablantes | ![Daily con arrastres](capturas/03_reunion_daily_arrastres.png)<br>**Daily**: estado por persona y acciones arrastradas de reuniones anteriores |
+| ![Tablero de acciones](capturas/04_tablero_acciones.png)<br>**Tablero de acciones** del histórico completo, con estancadas primero | ![Panel de corrección](capturas/05_panel_correccion.png)<br>**Panel de corrección**: editar, descartar, fusionar o encadenar acciones |
+| ![Búsqueda](capturas/06_busqueda.png)<br>**Búsqueda** de texto completo en las transcripciones | ![Chat](capturas/07_chat.png)<br>**Chat** sobre el histórico, con cada afirmación citando su fuente |
+
+Más: [inicio completo con métricas](capturas/01_inicio_timeline.png) ·
+[tema claro](capturas/08_portada_tema_claro.png).
+
 ## Cómo funciona
 
 - Captura tu **micrófono** (tu voz) con el dispositivo de entrada por defecto.
