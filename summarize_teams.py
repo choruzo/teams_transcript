@@ -15,8 +15,9 @@ Genera junto a la transcripcion:
   <nombre>_resumen.md
 
 Notas:
-  - Requiere la API key de LiteLLM en la variable de entorno LITELLM_API_KEY
-    (o pasarla con --api-key).
+  - URL, modelo y clave: --base-url/--model/--api-key o LITELLM_BASE_URL,
+    TEAMS_LLM_MODELO y LITELLM_API_KEY. La clave es opcional: un llama-server
+    directo no pide ninguna.
   - El LLM devuelve JSON estructurado; el Markdown se renderiza en Python a
     partir de ese JSON, de modo que la misma llamada alimenta el .md y la BD.
     Si el modelo no consigue devolver JSON valido (dos intentos), se guarda su
@@ -46,8 +47,8 @@ import rag
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-DEFAULT_MODEL = "qwen3.6-35b-a3b"
-DEFAULT_BASE_URL = "http://localhost:4000/v1"
+DEFAULT_MODEL = llm.DEFAULT_MODEL
+DEFAULT_BASE_URL = llm.DEFAULT_BASE_URL
 
 # La llamada estructurada quiere obediencia, no creatividad.
 TEMPERATURA_JSON = 0.1
@@ -290,7 +291,7 @@ def formatear_acciones_abiertas(filas) -> str:
 
 def call_litellm(
     base_url: str,
-    api_key: str,
+    api_key: str | None,
     model: str,
     messages: list[dict],
     temperature: float = 0.3,
@@ -474,7 +475,7 @@ def normalizar(
 
 def pedir_resumen(
     base_url: str,
-    api_key: str,
+    api_key: str | None,
     model: str,
     system_prompt: str,
     user_prompt: str,
@@ -918,18 +919,19 @@ def main() -> None:
     )
     parser.add_argument(
         "--model",
-        default=DEFAULT_MODEL,
-        help=f"Nombre del modelo en LiteLLM (por defecto: {DEFAULT_MODEL})",
+        default=None,
+        help=f"Nombre del modelo en LiteLLM (o TEAMS_LLM_MODELO; por defecto: {DEFAULT_MODEL})",
     )
     parser.add_argument(
         "--base-url",
-        default=DEFAULT_BASE_URL,
-        help=f"URL base de la API de LiteLLM (por defecto: {DEFAULT_BASE_URL})",
+        default=None,
+        help="URL base de la API de LiteLLM "
+        f"(o LITELLM_BASE_URL; por defecto: {DEFAULT_BASE_URL})",
     )
     parser.add_argument(
         "--api-key",
         default=None,
-        help="API key de LiteLLM (o usa la variable de entorno LITELLM_API_KEY)",
+        help="API key de LiteLLM (o LITELLM_API_KEY; un llama-server directo no pide ninguna)",
     )
     parser.add_argument(
         "--attendees",
@@ -1029,14 +1031,13 @@ def main() -> None:
         print(f"Error: no se encuentra el archivo '{transcript_path}'", file=sys.stderr)
         sys.exit(1)
 
-    api_key = args.api_key or os.environ.get("LITELLM_API_KEY")
-    if not api_key:
-        print(
-            "Error: falta la API key de LiteLLM. Pasa --api-key o define la "
-            "variable de entorno LITELLM_API_KEY.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    # Mismo orden que el resto del pipeline (argumento > entorno > defecto),
+    # resuelto en `llm`: con defaults propios en argparse, este script iba a
+    # localhost:4000 aunque procesar_teams.py hubiera sondeado otra URL. Y sin
+    # clave no es un error: un llama-server directo no la pide.
+    args.model = llm.modelo(args.model)
+    args.base_url = llm.base_url(args.base_url)
+    api_key = llm.api_key(args.api_key)
 
     transcript = transcript_path.read_text(encoding="utf-8")
 
