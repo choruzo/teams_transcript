@@ -10,7 +10,7 @@ from fastapi import APIRouter
 
 import memoria
 from api import VERSION
-from api.deps import ruta_bd, solo_lectura
+from api.deps import autenticacion_activa, ruta_bd, solo_lectura
 from api.modelos import Salud
 
 router = APIRouter()
@@ -22,6 +22,7 @@ def salud() -> Salud:
     base = Salud(
         version=VERSION,
         solo_lectura=solo_lectura(),
+        autenticacion=autenticacion_activa(),
         escritura=not solo_lectura(),
         base_de_datos=str(path),
         base_accesible=False,

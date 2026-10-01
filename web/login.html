@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Entrar · Memoria del equipo</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/estilo.css">
+
+  <!-- Mismo fragmento que el resto de páginas: js/tema.js es un módulo
+       diferido y sin esto la pantalla parpadearía en oscuro antes de pasar a
+       claro. Ver web/ESTILO.md. -->
+  <script>
+    try {
+      var t = localStorage.getItem("tema");
+    } catch (e) {
+      var t = null;
+    }
+    document.documentElement.dataset.tema =
+      t || (matchMedia("(prefers-color-scheme: light)").matches ? "claro" : "oscuro");
+  </script>
+</head>
+<body>
+  <main class="login-main">
+    <div class="tarjeta-login">
+      <h1>Memoria del equipo</h1>
+      <p class="nota">Acceso restringido. Introduce tus credenciales.</p>
+
+      <form id="entrar" autocomplete="on">
+        <div class="campo">
+          <label for="usuario">Usuario</label>
+          <input type="text" id="usuario" name="usuario" autocomplete="username"
+                 autofocus required>
+        </div>
+        <div class="campo">
+          <label for="clave">Clave</label>
+          <input type="password" id="clave" name="clave"
+                 autocomplete="current-password" required>
+        </div>
+        <button type="submit" id="entrar-boton">Entrar</button>
+      </form>
+
+      <div class="aviso error login-error" id="error" hidden role="alert"></div>
+    </div>
+  </main>
+
+  <script>
+    // Página autónoma a propósito: sin módulos ni api.js, para que un 401 no
+    // pueda reenviarse a sí misma (api.js redirige a /login.html) y crear un
+    // bucle. Todo lo que necesita cabe aquí.
+    const parametros = new URLSearchParams(window.location.search);
+    const formulario = document.getElementById("entrar");
+    const error = document.getElementById("error");
+    const boton = document.getElementById("entrar-boton");
+
+    // Solo se acepta un destino relativo del propio sitio: un `next` con
+    // `//host` o un esquema sería un redirect abierto.
+    function destino() {
+      const bruto = parametros.get("next") || "/";
+      return bruto.startsWith("/") && !bruto.startsWith("//") ? bruto : "/";
+    }
+
+    function mostrarError(mensaje) {
+      error.textContent = mensaje;
+      error.hidden = false;
+    }
+
+    // Si ya hay sesión, no tiene sentido pedirla otra vez.
+    fetch("/api/yo").then((r) => {
+      if (r.ok) window.location.replace(destino());
+    }).catch(() => {});
+
+    formulario.addEventListener("submit", async (evento) => {
+      evento.preventDefault();
+      error.hidden = true;
+      boton.disabled = true;
+      try {
+        const respuesta = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            usuario: document.getElementById("usuario").value,
+            clave: document.getElementById("clave").value,
+          }),
+        });
+        if (respuesta.ok) {
+          window.location.replace(destino());
+          return;
+        }
+        let detalle = "No se ha podido entrar.";
+        try {
+          const cuerpo = await respuesta.json();
+          if (typeof cuerpo.detail === "string") detalle = cuerpo.detail;
+        } catch (e) { /* sin JSON: nos quedamos con el mensaje genérico */ }
+        mostrarError(detalle);
+      } catch (e) {
+        mostrarError("No se puede contactar con el servidor.");
+      } finally {
+        boton.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

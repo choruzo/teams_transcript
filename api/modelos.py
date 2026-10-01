@@ -41,6 +41,13 @@ class Salud(BaseModel):
 
     version: str
     solo_lectura: bool
+    autenticacion: bool = Field(
+        default=True,
+        description=(
+            "Si la interfaz exige sesion. El pie lo consulta para ofrecer "
+            "'Salir' solo cuando hay login del que salir."
+        ),
+    )
     escritura: bool = Field(
         description=(
             "Si las rutas de correccion (I6a) aceptan escrituras; el panel lo "

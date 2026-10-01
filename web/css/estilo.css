@@ -1689,3 +1689,79 @@ a.fuente:hover { border-color: color-mix(in srgb, var(--verde) 45%, var(--line))
 .accion .abrir-ficha:focus-visible { box-shadow: var(--foco); }
 .acciones.tablero > li.seleccionada { border-color: var(--verde2); }
 .accion.seleccionada .abrir-ficha { color: var(--verde); font-weight: 600; }
+
+/* --- Login (autenticacion) --- */
+
+.login-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 8vh 1.25rem 2rem;
+}
+
+.tarjeta-login {
+  width: min(24rem, 100%);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radio);
+  box-shadow: var(--sombra);
+  padding: 1.6rem 1.5rem 1.4rem;
+}
+
+.tarjeta-login h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.25rem;
+}
+
+.tarjeta-login .nota { margin-top: 0; }
+
+.tarjeta-login form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  margin-top: 1.25rem;
+}
+
+.tarjeta-login .campo { flex-direction: column; }
+
+.tarjeta-login input {
+  width: 100%;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: var(--radio-s);
+  padding: 0.55rem 0.7rem;
+  font: 15px/1.4 var(--fuente);
+}
+
+.tarjeta-login input:focus {
+  outline: none;
+  border-color: var(--verde2);
+  box-shadow: var(--foco);
+}
+
+.tarjeta-login button[type="submit"] {
+  background: var(--verde2);
+  color: var(--sobre-acento);
+  border: none;
+  border-radius: var(--radio-s);
+  padding: 0.6rem 0.9rem;
+  font: 600 15px/1.4 var(--fuente);
+  cursor: pointer;
+}
+
+.tarjeta-login button[type="submit"]:disabled { opacity: 0.6; cursor: progress; }
+
+.login-error { margin-top: 0.9rem; }
+.login-error[hidden] { display: none; }
+
+footer .salir {
+  all: unset;
+  cursor: pointer;
+  color: var(--azul);
+  margin-left: 0.6rem;
+}
+
+footer .salir:hover { text-decoration: underline; text-underline-offset: 2px; }
+footer .salir:focus-visible { box-shadow: var(--foco); border-radius: var(--radio-s); }
+footer .salir[hidden] { display: none; }

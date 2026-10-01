@@ -19,6 +19,17 @@ services:
       # la web; antes de la primera escritura de cada dia se copia la base en
       # datos/copias/ (TEAMS_COPIAS_DIAS dias, 7 por defecto).
       TEAMS_API_SOLO_LECTURA: "1"
+      # Login (autenticacion.py). La base de usuarios vive junto a la de
+      # reuniones, dentro del volumen `datos`, para que sobreviva a un
+      # `docker compose up -d` y no viaje dentro de la imagen. El usuario
+      # inicial se siembra en el primer arranque con estas dos variables; si no
+      # se define la clave, es `admin` y el log avisa de que hay que cambiarla.
+      TEAMS_AUTENTICACION: ${TEAMS_AUTENTICACION:-1}
+      TEAMS_USUARIOS_DB: /app/datos/usuarios.db
+      TEAMS_ADMIN_USUARIO: ${TEAMS_ADMIN_USUARIO:-admin}
+      TEAMS_ADMIN_CLAVE: ${TEAMS_ADMIN_CLAVE:-}
+      # Ponerlo a 1 cuando la app se sirva por HTTPS (el proxy del portal).
+      TEAMS_COOKIE_SEGURA: ${TEAMS_COOKIE_SEGURA:-0}
       # La BD guarda rutas absolutas de la maquina que proceso la reunion;
       # dentro del contenedor el proyecto vive en /app. Ajusta el origen a la
       # ruta real del host (en Windows, algo como
@@ -45,6 +56,9 @@ services:
       - ./api:/app/api:ro
       - ./web:/app/web:ro
       - ./memoria.py:/app/memoria.py:ro
+      # El login: usuarios y sesiones en `datos/usuarios.db`. La API lo importa
+      # en cada peticion; sin este volumen montado la app no puede autenticar.
+      - ./autenticacion.py:/app/autenticacion.py:ro
       # La vista de reunion (I2) reutiliza `renderizar_markdown` y los
       # titulos de `TIPOS` de summarize_teams.py en vez de copiarlos, y ese
       # modulo importa glosario.py. Sin montarlos, la web funciona pero las

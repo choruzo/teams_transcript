@@ -25,7 +25,7 @@ Dos cosas distintas, con ritmos distintos:
 scp dist\teams-transcript-api-0.1.0.tar dist\SHA256SUMS.txt servidor:~/teams_transcript/dist/
 
 # El código: cada vez que se toca el front o la API. Son kilobytes.
-scp -r api web memoria.py summarize_teams.py glosario.py docker-compose.yml servidor:~/teams_transcript/
+scp -r api web autenticacion.py memoria.py summarize_teams.py glosario.py docker-compose.yml servidor:~/teams_transcript/
 ```
 
 ## 3. En el servidor
@@ -72,17 +72,27 @@ ve nada por la red. Se accede por túnel SSH:
 ssh -L 8080:127.0.0.1:8080 servidor
 ```
 
-Y luego <http://localhost:8080> en el navegador del portátil.
+Y luego <http://localhost:8080> en el navegador del portátil. La primera vez
+pide entrar: el usuario inicial es `admin` (la clave sale de `TEAMS_ADMIN_CLAVE`
+en `.env`; sin definirla es `admin` y el log avisa). Cámbiala sin arrancar la
+API con:
+
+```bash
+docker compose exec api python autenticacion.py --cambiar-clave admin
+```
+
+La base de usuarios vive en `datos/usuarios.db`, junto a `meetings.db` y dentro
+del volumen: no viaja en la imagen ni en las copias del histórico.
 
 Abrirlo a la red interna **exige autenticación primero** (`PLAN_INTERFAZ.md`,
-sección 6): sin ella, cualquiera de la red lee la transcripción literal de
-todas las reuniones.
+sección 6): el login ya existe, pero sin él cualquiera de la red leería la
+transcripción literal de todas las reuniones.
 
 ## Actualizar
 
 | Qué cambió | Qué hay que hacer |
 |---|---|
-| `web/`, `api/`, `memoria.py` | `scp` de los ficheros + `docker compose restart api` |
+| `web/`, `api/`, `memoria.py`, `autenticacion.py` | `scp` de los ficheros + `docker compose restart api` |
 | `summarize_teams.py`, `glosario.py` | igual: la API los monta porque reutiliza `renderizar_markdown` y los títulos de `TIPOS` |
 | `requirements-api.txt` | `exportar.ps1` con una versión nueva, `scp`, `docker load`, actualizar el tag en `docker-compose.yml`, `docker compose up -d` |
 | `docker-compose.yml` | `scp` + `docker compose up -d` |

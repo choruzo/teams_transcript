@@ -19,6 +19,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import autenticacion  # noqa: E402
 import memoria  # noqa: E402
 
 try:
@@ -42,6 +43,12 @@ class BaseAPI(unittest.TestCase):
         self._db_previa = os.environ.get(memoria.VARIABLE_ENTORNO)
         os.environ[memoria.VARIABLE_ENTORNO] = str(self.db)
         self.addCleanup(self._restaurar_entorno)
+        # La suite existente no conoce el login: se apaga la autenticacion aqui
+        # para que siga midiendo lo que medía. Las pruebas de login viven en
+        # TestAutenticacionAPI, que la vuelve a encender.
+        self._auth_previa = os.environ.get("TEAMS_AUTENTICACION")
+        os.environ["TEAMS_AUTENTICACION"] = "0"
+        self.addCleanup(self._restaurar_autenticacion)
         self.cliente = TestClient(app)
 
     def _restaurar_entorno(self):
@@ -49,6 +56,12 @@ class BaseAPI(unittest.TestCase):
             os.environ.pop(memoria.VARIABLE_ENTORNO, None)
         else:
             os.environ[memoria.VARIABLE_ENTORNO] = self._db_previa
+
+    def _restaurar_autenticacion(self):
+        if self._auth_previa is None:
+            os.environ.pop("TEAMS_AUTENTICACION", None)
+        else:
+            os.environ["TEAMS_AUTENTICACION"] = self._auth_previa
 
     def poblar(self, reuniones=(("2026-09-01", "daily"), ("2026-09-02", "retro"))):
         conn = memoria.conectar(self.db)
@@ -1251,6 +1264,84 @@ class TestEscrituraDeAcciones(BaseAPI):
         cruda = sqlite3.connect(self.db)
         self.assertEqual(cruda.execute("PRAGMA user_version").fetchone()[0], 3)
         cruda.close()
+
+
+class TestAutenticacionAPI(BaseAPI):
+    """Login de la interfaz: la API y las páginas exigen sesión."""
+
+    def setUp(self):
+        super().setUp()
+        self.usuarios = Path(self._tmp.name) / "usuarios.db"
+        self._usuarios_previa = os.environ.get(autenticacion.VARIABLE_ENTORNO)
+        os.environ[autenticacion.VARIABLE_ENTORNO] = str(self.usuarios)
+        self.addCleanup(self._restaurar_usuarios)
+        os.environ["TEAMS_AUTENTICACION"] = "1"
+        conn = autenticacion.conectar(self.usuarios)
+        autenticacion.crear_usuario(conn, "ana", "secreta")
+        conn.close()
+        # La API de meses de reunion exige que la base exista; aqui solo hace
+        # falta que no de 503, asi que se puebla con lo minimo.
+        self.poblar()
+
+    def _restaurar_usuarios(self):
+        if self._usuarios_previa is None:
+            os.environ.pop(autenticacion.VARIABLE_ENTORNO, None)
+        else:
+            os.environ[autenticacion.VARIABLE_ENTORNO] = self._usuarios_previa
+
+    def test_api_sin_sesion_da_401(self):
+        respuesta = self.cliente.get("/api/reuniones")
+        self.assertEqual(respuesta.status_code, 401)
+        self.assertIn("Sesion", respuesta.json()["detail"])
+
+    def test_salud_y_login_estan_abiertos(self):
+        self.assertEqual(self.cliente.get("/api/salud").status_code, 200)
+        self.assertEqual(self.cliente.get("/login.html").status_code, 200)
+
+    def test_pagina_redirige_al_login(self):
+        respuesta = self.cliente.get("/", follow_redirects=False)
+        self.assertEqual(respuesta.status_code, 303)
+        self.assertIn("/login.html?next=", respuesta.headers["location"])
+
+    def test_redirige_conservando_el_prefijo_del_proxy(self):
+        """Detras de /app5/ el `next` tiene que volver a la app, no al portal."""
+        respuesta = self.cliente.get(
+            "/", follow_redirects=False, headers={"X-Forwarded-Prefix": "/app5"}
+        )
+        self.assertEqual(respuesta.status_code, 303)
+        self.assertIn("next=%2Fapp5%2F", respuesta.headers["location"])
+
+    def test_login_incorrecto(self):
+        respuesta = self.cliente.post(
+            "/api/login", json={"usuario": "ana", "clave": "mala"}
+        )
+        self.assertEqual(respuesta.status_code, 401)
+
+    def test_login_correcto_abre_la_api_y_el_yo(self):
+        respuesta = self.cliente.post(
+            "/api/login", json={"usuario": "ana", "clave": "secreta"}
+        )
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(respuesta.json()["usuario"], "ana")
+        self.assertIn("teams_sesion", respuesta.cookies)
+        self.assertEqual(self.cliente.get("/api/reuniones").status_code, 200)
+        self.assertEqual(self.cliente.get("/api/yo").json()["usuario"], "ana")
+
+    def test_logout_invalida_la_sesion(self):
+        self.cliente.post("/api/login", json={"usuario": "ana", "clave": "secreta"})
+        self.assertEqual(self.cliente.get("/api/reuniones").status_code, 200)
+        self.assertEqual(self.cliente.post("/api/logout").status_code, 200)
+        self.assertEqual(self.cliente.get("/api/reuniones").status_code, 401)
+
+    def test_siembra_el_usuario_inicial(self):
+        os.environ.pop(autenticacion.VARIABLE_ENTORNO, None)
+        # Base de usuarios nueva: el login la siembra con admin/admin.
+        otro = Path(self._tmp.name) / "otra.db"
+        os.environ[autenticacion.VARIABLE_ENTORNO] = str(otro)
+        respuesta = self.cliente.post(
+            "/api/login", json={"usuario": "admin", "clave": "admin"}
+        )
+        self.assertEqual(respuesta.status_code, 200)
 
 
 if __name__ == "__main__":

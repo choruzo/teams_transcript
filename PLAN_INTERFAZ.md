@@ -672,6 +672,11 @@ después estarán en un puerto HTTP.
   (`ssh -L 8080:127.0.0.1:8080 servidor`). No hay autenticación propia,
   certificados ni gestión de usuarios: la barrera es la misma que ya protege el
   servidor. Es la opción segura y no cuesta nada.
+  - **Actualización (2026-10)**: ya hay login propio de un solo usuario
+    (`autenticacion.py`, `api/rutas/auth.py`, `web/login.html`), con usuarios y
+    sesiones en `datos/usuarios.db`. No cambia el bind ni sustituye al túnel:
+    es una capa más para cuando la app se expone a través del portal. La suite
+    vieja lo desactiva con `TEAMS_AUTENTICACION=0`.
 - **Abrirlo a la LAN más adelante no es cambiar un puerto.** Requeriría
   autenticación (*basic auth* sobre HTTPS con certificado interno, como mínimo)
   antes de tocar el `bind`. Sin ella, cualquiera de la red leería la

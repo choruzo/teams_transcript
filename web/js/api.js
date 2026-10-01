@@ -3,6 +3,18 @@
 
 const BASE = "/api";
 
+/**
+ * Lleva a la pantalla de login recordando dónde se estaba.
+ *
+ * La sesión puede caducar mientras la pestaña sigue abierta, y entonces
+ * cualquier petición devuelve 401. Redirigir aquí, en el único punto que habla
+ * con el servidor, evita que cada vista tenga que enterarse.
+ */
+export function irAEntrar() {
+  const next = window.location.pathname + window.location.search;
+  window.location.href = `/login.html?next=${encodeURIComponent(next)}`;
+}
+
 async function pedir(ruta, parametros = {}) {
   const url = new URL(BASE + ruta, window.location.origin);
   for (const [clave, valor] of Object.entries(parametros)) {
@@ -25,6 +37,10 @@ async function pedir(ruta, parametros = {}) {
     throw new Error("No se puede contactar con el servidor.");
   }
 
+  if (respuesta.status === 401) {
+    irAEntrar();
+    throw new Error("La sesión ha caducado.");
+  }
   if (!respuesta.ok) throw await errorDeRespuesta(respuesta);
   return respuesta.json();
 }
@@ -80,6 +96,10 @@ async function escribir(metodo, ruta, ficha, cuerpo) {
   } catch (_) {
     throw new Error("No se puede contactar con el servidor.");
   }
+  if (respuesta.status === 401) {
+    irAEntrar();
+    throw new Error("La sesión ha caducado.");
+  }
   if (!respuesta.ok) throw await errorDeRespuesta(respuesta);
   return respuesta.json();
 }
@@ -88,6 +108,18 @@ const accion = (uid) => `/acciones/${encodeURIComponent(uid)}`;
 
 export const api = {
   salud: () => pedir("/salud"),
+  // Sesión (autenticación). El login vive en login.html, que no importa este
+  // módulo para no poder reenviarse a sí misma; aquí solo están el cierre de
+  // sesión y la consulta del usuario para el pie.
+  yo: () => pedir("/yo"),
+  cerrarSesion: async () => {
+    try {
+      await fetch(BASE + "/logout", { method: "POST" });
+    } catch (_) {
+      /* aunque falle, la cookie se limpia al ir al login */
+    }
+    window.location.href = "/login.html";
+  },
   reuniones: (filtros) => pedir("/reuniones", filtros),
   // Devuelve la reunion **completa** (secciones, acciones, arrastres): el
   // mismo endpoint que en I0 daba solo la ficha, ahora con mas campos.
@@ -162,6 +194,11 @@ function preguntar(cuerpo, manejadores = {}) {
     }
     if (!respuesta.ok) {
       // Aquí el error todavía es un JSON normal: el stream no ha empezado.
+      if (respuesta.status === 401) {
+        irAEntrar();
+        manejadores.error?.("La sesión ha caducado.");
+        return;
+      }
       let detalle = `Error ${respuesta.status}`;
       try {
         const json = await respuesta.json();
