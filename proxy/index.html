@@ -1,0 +1,732 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Portal · Infraestructura</title>
+<style>
+  @font-face {
+    font-family: "PortalMono";
+    src: local("JetBrains Mono"), local("IBM Plex Mono"), local("Menlo"), local("Consolas");
+  }
+
+  :root {
+    --bg: #0a0d0e;
+    --bg-grain: #0c1011;
+    --panel: #101415;
+    --panel-hover: #131819;
+    --border: #1c2324;
+    --border-hover: #3a4d49;
+    --text: #cdd4d1;
+    --text-dim: #63706c;
+    --text-faint: #3d4746;
+    --accent: #6ea89a;
+    --accent-dim: #3f5b54;
+    --warn: #b58a4a;
+    --down: #a85f4d;
+    --mono: "PortalMono", ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --radius: 8px;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--bg);
+    background-image:
+      radial-gradient(ellipse 900px 500px at 15% -10%, rgba(110,168,154,0.05), transparent 60%),
+      radial-gradient(ellipse 700px 500px at 100% 20%, rgba(110,168,154,0.03), transparent 55%);
+    color: var(--text);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: inherit; }
+
+  /* ---------- barra superior tipo status line ---------- */
+  .statusbar {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 13px 24px;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    letter-spacing: 0.02em;
+    flex-wrap: wrap;
+  }
+  .statusbar .sep { color: var(--border-hover); }
+  .statusbar .live-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    margin-right: 7px;
+    animation: pulse 3s ease-in-out infinite;
+  }
+  .statusbar #clock {
+    color: var(--text);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+  .statusbar .stat {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .statusbar .stat .n {
+    color: var(--text);
+    font-weight: 600;
+  }
+  .statusbar .stat.ok .n { color: var(--accent); }
+  .statusbar .stat.warn .n { color: var(--warn); }
+  .statusbar .stat.down .n { color: var(--down); }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
+  }
+
+  header {
+    padding: 44px 24px 24px;
+    max-width: 1000px;
+    margin: 0 auto;
+  }
+  header .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+  header h1 {
+    margin: 0 0 8px;
+    font-size: 1.65rem;
+    font-weight: 600;
+    letter-spacing: -0.3px;
+    color: var(--text);
+  }
+  header p {
+    margin: 0;
+    color: var(--text-dim);
+    font-size: 0.92rem;
+  }
+
+  .toolbar {
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 0 24px 8px;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  #search {
+    flex: 1;
+    min-width: 200px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 9px 12px;
+    border-radius: var(--radius);
+    font-size: 0.85rem;
+    font-family: var(--mono);
+    outline: none;
+    transition: border-color 0.15s ease;
+  }
+  #search::placeholder { color: var(--text-faint); }
+  #search:focus { border-color: var(--accent-dim); }
+
+  .tag-filter {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 8px 13px;
+    border-radius: var(--radius);
+    font-size: 0.76rem;
+    font-family: var(--mono);
+    cursor: pointer;
+    user-select: none;
+    transition: border-color 0.15s ease, color 0.15s ease;
+  }
+  .tag-filter:hover { color: var(--text); }
+  .tag-filter.active {
+    border-color: var(--accent-dim);
+    color: var(--accent);
+  }
+
+  main {
+    max-width: 1000px;
+    margin: 20px auto 60px;
+    padding: 0 24px;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+    gap: 12px;
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 18px 14px;
+    text-decoration: none;
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    opacity: 0;
+    transform: translateY(6px);
+    animation: enter 0.5s ease forwards;
+    transition: border-color 0.18s ease, background 0.18s ease;
+  }
+  @keyframes enter {
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .card:hover {
+    border-color: var(--border-hover);
+    background: var(--panel-hover);
+  }
+  .card:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .card-top {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .icon {
+    font-size: 1.15rem;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(110,168,154,0.07);
+    border: 1px solid rgba(110,168,154,0.12);
+    border-radius: 7px;
+    flex-shrink: 0;
+  }
+  .card-title {
+    font-weight: 600;
+    font-size: 0.96rem;
+    line-height: 1.25;
+  }
+
+  .card-desc {
+    color: var(--text-dim);
+    font-size: 0.82rem;
+    line-height: 1.45;
+    flex: 1;
+  }
+
+  .card-route {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .card-route .path::before { content: "→ "; color: var(--text-faint); }
+
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-faint);
+    flex-shrink: 0;
+  }
+  .dot.ok { background: var(--accent); animation: pulse 3s ease-in-out infinite; }
+  .dot.down { background: var(--down); }
+  .dot.checking { background: var(--warn); animation: pulse 1.1s ease-in-out infinite; }
+
+  .empty {
+    text-align: center;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    padding: 60px 0;
+    display: none;
+  }
+
+  footer {
+    text-align: center;
+    color: var(--text-faint);
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    padding: 20px;
+    letter-spacing: 0.02em;
+  }
+
+  /* ---------- panel de terminal: log de nginx en vivo ---------- */
+  .term-panel {
+    max-width: 1000px;
+    margin: 0 auto 40px;
+    padding: 0 24px;
+  }
+  .term-frame {
+    background: #080b0b;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .term-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  .term-title {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .term-title .dot {
+    width: 6px; height: 6px;
+  }
+  .term-controls { display: flex; gap: 6px; }
+  .term-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-faint);
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    padding: 4px 9px;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+  .term-btn:hover { color: var(--text); border-color: var(--border-hover); }
+  .term-btn.active { color: var(--warn); border-color: var(--warn); }
+
+  .term-body {
+    height: 220px;
+    overflow-y: auto;
+    padding: 10px 14px;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    line-height: 1.65;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+    position: relative;
+  }
+  .term-body::-webkit-scrollbar { width: 8px; }
+  .term-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+  .term-line {
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--text-dim);
+    opacity: 0;
+    animation: line-in 0.25s ease forwards;
+  }
+  @keyframes line-in { to { opacity: 1; } }
+  .term-line .s2xx { color: var(--accent); }
+  .term-line .s3xx { color: var(--text-dim); }
+  .term-line .s4xx { color: var(--warn); }
+  .term-line .s5xx { color: var(--down); }
+  .term-empty {
+    color: var(--text-faint);
+    font-style: normal;
+  }
+
+  .term-jump {
+    display: none;
+    position: sticky;
+    bottom: 8px;
+    margin: 0 auto;
+    width: fit-content;
+    background: var(--panel-hover);
+    border: 1px solid var(--border-hover);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    padding: 4px 10px;
+    border-radius: 20px;
+    cursor: pointer;
+  }
+  .term-jump.show { display: block; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+    .card { opacity: 1; transform: none; }
+    .term-line { opacity: 1; }
+  }
+</style>
+</head>
+<body>
+
+<div class="statusbar">
+  <span><span class="live-dot"></span><span id="clock">--:--:--</span></span>
+  <span class="sep">·</span>
+  <span class="stat"><span class="n" id="svc-total">0</span> servicios</span>
+  <span class="sep">·</span>
+  <span class="stat" id="stat-ok"><span class="n" id="ok-count">0</span> activos</span>
+</div>
+
+<header>
+  <div class="eyebrow">acceso interno</div>
+  <h1>Portal de Infraestructura</h1>
+  <p>Selecciona un servicio para acceder</p>
+</header>
+
+<div class="toolbar">
+  <input type="text" id="search" placeholder="buscar servicio...">
+  <div id="tags"></div>
+</div>
+
+<main>
+  <div class="grid" id="grid"></div>
+  <div class="empty" id="empty">sin coincidencias</div>
+</main>
+
+<section class="term-panel">
+  <div class="term-frame">
+    <div class="term-header">
+      <span class="term-title"><span class="dot checking" id="term-dot"></span>nginx · access.log</span>
+      <span class="term-controls">
+        <button class="term-btn" id="term-pause">pausar</button>
+        <button class="term-btn" id="term-clear">limpiar</button>
+      </span>
+    </div>
+    <div class="term-body" id="term-body">
+      <div class="term-line term-empty">conectando…</div>
+    </div>
+    <div class="term-jump" id="term-jump">nuevas líneas ↓</div>
+  </div>
+</section>
+
+<footer>enrutado vía nginx · un único túnel</footer>
+
+<script>
+/* ============================================================
+   CONFIGURACIÓN DE APPS
+   Para añadir un nuevo servicio, agrega un objeto al array.
+   - name:  nombre visible
+   - desc:  descripción corta
+   - url:   ruta o URL absoluta a la que enlaza la tarjeta
+   - icon:  cualquier emoji o carácter
+   - tags:  array de etiquetas para filtrar
+   - checkHealth: (opcional) ruta a comprobar con fetch para
+                  mostrar el punto de estado (ok/down). Déjalo
+                  vacío ("") si no quieres comprobación.
+   NOTA: el CI/CD va montado por Nginx bajo /cicd/ (prefijo reescrito con
+   proxy_pass + X-Forwarded-Prefix), así que sigue usando el único puerto
+   reenviado en el túnel SSH (8443).
+   ============================================================ */
+const APPS = [
+  {
+    name: "vCenter Agent",
+    desc: "Plataforma multiagente para gestión de infraestructura VMware.",
+    url: "/vcenter/",
+    icon: "🖥️",
+    tags: ["vmware", "ia"],
+    checkHealth: "/vcenter/"
+  },
+  {
+    name: "Pipeline CI/CD",
+    desc: "Monitorización de tags, compilación, SonarQube y despliegue GALTTCMC.",
+    url: "/cicd/",
+    icon: "🚀",
+    tags: ["infra", "cicd"],
+    checkHealth: "/cicd/login"
+  },
+  {
+    name: "Infografías",
+    desc: "Galería de infografías y contenidos estáticos.",
+    url: "/app1/",
+    icon: "📊",
+    tags: ["infra"],
+    checkHealth: "/app1/"
+  },
+  {
+    name: "Sistema validación GTR",
+    desc: "Sistema autónomo de validación GTR mediante modelos locales.",
+    url: "/app2/",
+    icon: "⚙️",
+    tags: ["validación"],
+    checkHealth: "/api/v1/salud"
+  },
+  {
+    name: "Prometheus",
+    desc: "Recolector de métricas",
+    url: "/app3/",
+    icon: "📊",
+    tags: ["infra"],
+    checkHealth: "/app1/"
+  },
+  {
+    name: "Grafana",
+    desc: "Visualizador de métricas infra.",
+    url: "/app4/",
+    icon: "📊",
+    tags: ["infra"],
+    checkHealth: "/api/v1/salud"
+  },
+  {
+    name: "Seguimientos",
+    desc: "Seguimiento daylis generales software TTC&ULS.",
+    url: "/app5/",
+    icon: "📊",
+    tags: ["resp"],
+    checkHealth: "/api/salud"
+  },
+  // Añade más servicios aquí:
+  // {
+  //   name: "Nueva App",
+  //   desc: "Descripción breve.",
+  //   url: "/app3/",
+  //   icon: "⚙️",
+  //   tags: ["infra"],
+  //   checkHealth: "/app3/health"
+  // },
+];
+
+const grid = document.getElementById('grid');
+const emptyMsg = document.getElementById('empty');
+const searchInput = document.getElementById('search');
+const tagsContainer = document.getElementById('tags');
+const clockEl = document.getElementById('clock');
+const svcTotalEl = document.getElementById('svc-total');
+const okCountEl = document.getElementById('ok-count');
+const statOkEl = document.getElementById('stat-ok');
+
+let activeTag = null;
+
+function tick() {
+  const now = new Date();
+  clockEl.textContent = now.toLocaleTimeString('es-ES', { hour12: false });
+}
+tick();
+setInterval(tick, 1000);
+
+function allTags() {
+  const s = new Set();
+  APPS.forEach(a => (a.tags || []).forEach(t => s.add(t)));
+  return [...s];
+}
+
+function renderTags() {
+  tagsContainer.innerHTML = '';
+  tagsContainer.style.display = 'flex';
+  tagsContainer.style.gap = '8px';
+  tagsContainer.style.flexWrap = 'wrap';
+  allTags().forEach(tag => {
+    const el = document.createElement('div');
+    el.className = 'tag-filter' + (activeTag === tag ? ' active' : '');
+    el.textContent = tag;
+    el.onclick = () => {
+      activeTag = activeTag === tag ? null : tag;
+      renderTags();
+      renderGrid();
+    };
+    tagsContainer.appendChild(el);
+  });
+}
+
+function shortPath(url) {
+  try {
+    if (url.startsWith('http')) {
+      const u = new URL(url);
+      return u.hostname + (u.port ? ':' + u.port : '');
+    }
+    return url;
+  } catch (e) {
+    return url;
+  }
+}
+
+function renderGrid() {
+  const query = searchInput.value.trim().toLowerCase();
+  const filtered = APPS.filter(app => {
+    const matchesQuery = !query ||
+      app.name.toLowerCase().includes(query) ||
+      app.desc.toLowerCase().includes(query);
+    const matchesTag = !activeTag || (app.tags || []).includes(activeTag);
+    return matchesQuery && matchesTag;
+  });
+
+  grid.innerHTML = '';
+  emptyMsg.style.display = filtered.length ? 'none' : 'block';
+  svcTotalEl.textContent = APPS.length;
+
+  filtered.forEach((app, i) => {
+    const card = document.createElement('a');
+    card.className = 'card';
+    card.href = app.url;
+    card.style.animationDelay = (i * 40) + 'ms';
+    card.innerHTML = `
+      <div class="card-top">
+        <div class="icon">${app.icon || '🔗'}</div>
+        <div class="card-title">${app.name}</div>
+      </div>
+      <div class="card-desc">${app.desc || ''}</div>
+      <div class="card-route">
+        <span class="path">${shortPath(app.url)}</span>
+        <span class="status" data-health="${app.checkHealth || ''}">
+          <span class="dot ${app.checkHealth ? 'checking' : ''}"></span>
+          <span class="label">${app.checkHealth ? '...' : ''}</span>
+        </span>
+      </div>
+    `;
+    grid.appendChild(card);
+  });
+
+  checkHealthAll();
+}
+
+async function checkHealthAll() {
+  const statuses = document.querySelectorAll('.status[data-health]');
+  let ok = 0;
+  let total = 0;
+  for (const el of statuses) {
+    const path = el.getAttribute('data-health');
+    const dot = el.querySelector('.dot');
+    const label = el.querySelector('.label');
+    if (!path) continue;
+    total++;
+    try {
+      await fetch(path, { method: 'GET', mode: 'no-cors' });
+      dot.className = 'dot ok';
+      label.textContent = 'activo';
+      ok++;
+    } catch (e) {
+      dot.className = 'dot down';
+      label.textContent = 'inactivo';
+    }
+  }
+  okCountEl.textContent = ok;
+  statOkEl.classList.remove('ok', 'warn', 'down');
+  if (total === 0) {
+    // sin servicios comprobables
+  } else if (ok === total) {
+    statOkEl.classList.add('ok');
+  } else if (ok === 0) {
+    statOkEl.classList.add('down');
+  } else {
+    statOkEl.classList.add('warn');
+  }
+}
+
+searchInput.addEventListener('input', renderGrid);
+
+renderTags();
+renderGrid();
+
+/* ---------- terminal: log de nginx en vivo (SSE) ----------
+   Requiere el backend log_stream.py corriendo detrás de Nginx en
+   /logs/stream (ver log_stream.py + nginx-logs-block.conf). Si esa
+   ruta no existe, el punto de estado se queda en rojo y no rompe
+   nada más del portal. */
+const termBody = document.getElementById('term-body');
+const termDot = document.getElementById('term-dot');
+const termPauseBtn = document.getElementById('term-pause');
+const termClearBtn = document.getElementById('term-clear');
+const termJump = document.getElementById('term-jump');
+
+const MAX_LINEAS = 300;
+let pausado = false;
+let primeraLinea = true;
+
+function estaAbajo() {
+  return termBody.scrollHeight - termBody.scrollTop - termBody.clientHeight < 24;
+}
+
+function colorearLinea(texto) {
+  // combined log format de nginx: ... "GET /ruta HTTP/1.1" 200 1234 ...
+  const m = texto.match(/"\s(\d{3})\s\d+/) || texto.match(/\s(\d{3})\s/);
+  let cls = '';
+  if (m) {
+    const code = m[1];
+    if (code.startsWith('2')) cls = 's2xx';
+    else if (code.startsWith('3')) cls = 's3xx';
+    else if (code.startsWith('4')) cls = 's4xx';
+    else if (code.startsWith('5')) cls = 's5xx';
+  }
+  const span = document.createElement('div');
+  span.className = 'term-line' + (cls ? ' ' + cls : '');
+  span.textContent = texto;
+  return span;
+}
+
+function pushLinea(texto) {
+  if (primeraLinea) {
+    termBody.innerHTML = '';
+    primeraLinea = false;
+  }
+  const seguirAbajo = estaAbajo();
+  termBody.appendChild(colorearLinea(texto));
+  while (termBody.children.length > MAX_LINEAS) {
+    termBody.removeChild(termBody.firstChild);
+  }
+  if (!pausado && seguirAbajo) {
+    termBody.scrollTop = termBody.scrollHeight;
+    termJump.classList.remove('show');
+  } else if (!seguirAbajo) {
+    termJump.classList.add('show');
+  }
+}
+
+termBody.addEventListener('scroll', () => {
+  if (estaAbajo()) termJump.classList.remove('show');
+});
+termJump.addEventListener('click', () => {
+  termBody.scrollTop = termBody.scrollHeight;
+  termJump.classList.remove('show');
+});
+termPauseBtn.addEventListener('click', () => {
+  pausado = !pausado;
+  termPauseBtn.textContent = pausado ? 'reanudar' : 'pausar';
+  termPauseBtn.classList.toggle('active', pausado);
+});
+termClearBtn.addEventListener('click', () => {
+  termBody.innerHTML = '';
+  primeraLinea = true;
+});
+
+function conectarLogs() {
+  try {
+    const es = new EventSource('/logs/stream');
+    es.onopen = () => { termDot.className = 'dot ok'; };
+    es.onmessage = (ev) => {
+      if (!pausado) pushLinea(ev.data);
+    };
+    es.onerror = () => {
+      termDot.className = 'dot down';
+      // EventSource reintenta solo; si el endpoint no existe, evitamos
+      // reconexiones infinitas ruidosas cerrando tras el primer fallo.
+    };
+  } catch (e) {
+    termDot.className = 'dot down';
+  }
+}
+conectarLogs();
+</script>
+
+</body>
+</html>

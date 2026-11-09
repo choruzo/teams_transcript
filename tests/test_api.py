@@ -1311,6 +1311,15 @@ class TestAutenticacionAPI(BaseAPI):
         self.assertEqual(respuesta.status_code, 303)
         self.assertIn("next=%2Fapp5%2F", respuesta.headers["location"])
 
+    def test_paginas_y_assets_no_se_cachean_sin_revalidar(self):
+        """Sin Cache-Control el navegador servia el index de antes del login
+        desde su cache y la pantalla de login no llegaba a salir."""
+        self.assertEqual(
+            self.cliente.get("/login.html").headers.get("cache-control"), "no-cache"
+        )
+        redireccion = self.cliente.get("/", follow_redirects=False)
+        self.assertEqual(redireccion.headers.get("cache-control"), "no-store")
+
     def test_login_incorrecto(self):
         respuesta = self.cliente.post(
             "/api/login", json={"usuario": "ana", "clave": "mala"}

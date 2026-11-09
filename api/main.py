@@ -89,6 +89,23 @@ def _es_libre(ruta: str) -> bool:
 
 
 @app.middleware("http")
+async def sin_cache_heuristica(request: Request, call_next):
+    """Obliga al navegador a revalidar paginas y assets en cada carga.
+
+    StaticFiles solo manda `Last-Modified`/`ETag`, y sin `Cache-Control` el
+    navegador aplica cache heuristica: da por buena su copia durante un ~10 %
+    de su antiguedad sin preguntar. Asi, un `index.html` cacheado antes del
+    login se seguia pintando sin pasar por `exigir_sesion`, y un `api.js` viejo
+    no sabia redirigir ante un 401. `no-cache` no impide cachear: revalida con
+    el ETag y la respuesta habitual es un 304 sin cuerpo.
+    """
+    respuesta = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        respuesta.headers.setdefault("Cache-Control", "no-cache")
+    return respuesta
+
+
+@app.middleware("http")
 async def exigir_sesion(request: Request, call_next):
     """Protege todo salvo lo publico: 401 en la API y redireccion en el HTML.
 
@@ -117,7 +134,9 @@ async def exigir_sesion(request: Request, call_next):
     from urllib.parse import quote
 
     return RedirectResponse(
-        f"/login.html?next={quote(destino, safe='')}", status_code=303
+        f"/login.html?next={quote(destino, safe='')}",
+        status_code=303,
+        headers={"Cache-Control": "no-store"},
     )
 
 
