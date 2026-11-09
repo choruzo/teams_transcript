@@ -352,6 +352,7 @@ class TestBusqueda(BaseIndice):
             resultado["fragmentos"][0]["idx_fin"],
         )
 
+    @unittest.skipUnless(HAY_VEC, "requiere sqlite-vec")
     def test_un_embebedor_que_falla_degrada_a_lexica_con_aviso(self):
         conn, conn_idx = self.poblar()
 
