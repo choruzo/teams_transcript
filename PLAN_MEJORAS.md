@@ -915,6 +915,15 @@ Lo que cambió al implementarla:
    servidor con `--dry-run-reconciliacion` sobre las dailys reales, con el
    mismo modelo y con `qwen3.8-27b`.
 
+**Actualización (2026-11-09).** Calibrado con las dos dailys reales y
+`qwen3.8-27b`: a 0,75 todas las parejas eran correctas pero se perdían
+paráfrasis claras (0,716 y 0,705); a **0,70** entraban esas dos sin ninguna
+pareja falsa, así que el umbral queda en 0,70. Además, el reproceso real
+demostró que borrar las acciones sin pareja es demasiado frágil cuando el
+modelo cambia: por defecto ahora se conservan con `revisar = 1` y solo
+`--borrar-sin-pareja` recupera el borrado del paso 6. El modo simulado enseña
+esa decisión (`se_borraria`).
+
 Para desplegar: `python memoria.py --migrar` en el servidor antes de
 actualizar la API (en solo lectura responde 503 con una base en esquema 2).
 

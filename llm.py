@@ -65,6 +65,15 @@ LOTE_EMBEDDINGS = 32
 # usuario NO se toca: ahi pensar puede mejorarla, y esa decision es del modelo.
 CLAVE_SIN_RAZONAMIENTO = "reasoning_effort"
 
+# Semilla fija: sin ella, dos reprocesos de la misma transcripcion devuelven
+# acciones distintas y la reconciliacion borra/conserva cosas diferentes. Con
+# `seed` el modelo es reproducible en el mismo backend y version. Se puede
+# cambiar por entorno (TEAMS_LLM_SEED) y, si el backend no lo conoce, se
+# reintenta sin el campo igual que con `reasoning_effort`.
+CLAVE_SEMILLA = "seed"
+VARIABLE_SEMILLA = "TEAMS_LLM_SEED"
+SEMILLA_POR_DEFECTO = 42
+
 
 class ErrorLLM(RuntimeError):
     """Fallo al hablar con LiteLLM, con un mensaje presentable al usuario."""
@@ -113,6 +122,32 @@ def _segundos(explicito: int | None, variable: str, defecto: int) -> int:
             file=sys.stderr,
         )
         return defecto
+    return valor
+
+
+def semilla(explicita: int | None = None) -> int:
+    """Semilla del muestreo: argumento > TEAMS_LLM_SEED > SEMILLA_POR_DEFECTO.
+
+    Se resuelve en cada llamada, como los timeouts, para que el entorno no se
+    quede congelado al importar. Un valor no numerico o negativo se ignora con
+    aviso: una semilla mal puesta no puede tumbar el pipeline.
+    """
+    if explicita is not None:
+        return explicita
+    crudo = os.environ.get(VARIABLE_SEMILLA)
+    if not crudo:
+        return SEMILLA_POR_DEFECTO
+    try:
+        valor = int(crudo)
+    except ValueError:
+        valor = -1
+    if valor < 0:
+        print(
+            f"Aviso: {VARIABLE_SEMILLA}='{crudo}' no es una semilla valida; "
+            f"se usa {SEMILLA_POR_DEFECTO}.",
+            file=sys.stderr,
+        )
+        return SEMILLA_POR_DEFECTO
     return valor
 
 
@@ -227,24 +262,52 @@ def chat(
     temperature: float = 0.3,
     timeout: int | None = None,
     sin_razonamiento: bool = False,
+    seed: int | None = None,
 ) -> str:
-    """Una respuesta completa. Es la llamada que usa el pipeline de resumen."""
+    """Una respuesta completa. Es la llamada que usa el pipeline de resumen.
+
+    `seed` fija el muestreo para que reprocesar la misma transcripcion de el
+    mismo resultado. Por defecto sale de TEAMS_LLM_SEED (42); si el backend no
+    conoce el campo, se reintenta sin el, porque es una garantia de
+    reproducibilidad y no un requisito para responder.
+    """
     timeout = timeout_chat(timeout)
-    payload = {"model": model, "messages": messages, "temperature": temperature}
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        CLAVE_SEMILLA: semilla(seed),
+    }
+    opcionales = []
     if sin_razonamiento:
         payload[CLAVE_SIN_RAZONAMIENTO] = "none"
+        opcionales.append(CLAVE_SIN_RAZONAMIENTO)
+    # La semilla va la ultima: si el backend solo rechaza el razonamiento, el
+    # primer reintento la conserva y la reproducibilidad no se pierde.
+    opcionales.append(CLAVE_SEMILLA)
     url = f"{base.rstrip('/')}/chat/completions"
     try:
         with _abrir(_peticion(url, clave, payload), base, timeout) as respuesta:
             cuerpo = json.loads(respuesta.read().decode("utf-8"))
-    except ErrorLLM:
-        if not sin_razonamiento:
+    except ErrorLLM as exc:
+        # El backend no conoce `seed` o `reasoning_effort` y ha devuelto un
+        # 400/422. Son optimizaciones, no requisitos: se repite quitando un
+        # campo cada vez, para no perder la semilla si solo sobraba el
+        # razonamiento. Un timeout o una clave mala no se reintentan: solo
+        # alargarian la espera sin cambiar el resultado.
+        if "HTTP 400" not in str(exc) and "HTTP 422" not in str(exc):
             raise
-        # El backend no conoce `reasoning_effort` y ha devuelto un 400. Es una
-        # optimizacion, no un requisito: se repite sin ella.
-        payload.pop(CLAVE_SIN_RAZONAMIENTO, None)
-        with _abrir(_peticion(url, clave, payload), base, timeout) as respuesta:
-            cuerpo = json.loads(respuesta.read().decode("utf-8"))
+        fallo = exc
+        for campo in opcionales:
+            payload.pop(campo, None)
+            try:
+                with _abrir(_peticion(url, clave, payload), base, timeout) as respuesta:
+                    cuerpo = json.loads(respuesta.read().decode("utf-8"))
+                break
+            except ErrorLLM as otro:
+                fallo = otro
+        else:
+            raise fallo
     try:
         return cuerpo["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:

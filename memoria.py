@@ -74,7 +74,12 @@ CONFIANZA_A_NUMERO = {"alta": 0.9, "media": 0.6, "baja": 0.3}
 # de voz, es una medicion y no una preferencia, y se calibra con
 # `summarize_teams.py --dry-run-reconciliacion` reprocesando dailys reales con
 # el mismo modelo y con otro.
-UMBRAL_RECONCILIACION = 0.75
+# Calibrado el 2026-11-09 con las dos dailys reales y qwen3.8-27b: a 0,75
+# todas las parejas eran correctas, pero se quedaban fuera parafrasis claras
+# (0,716 y 0,705); a 0,70 entraban esas dos sin ninguna pareja falsa. Por
+# debajo de 0,60 solo hay que bajar con mas datos: el modelo parafrasea y el
+# parecido de texto deja de ser una prueba fiable.
+UMBRAL_RECONCILIACION = 0.70
 
 # Quien hizo una correccion. Solo documenta: las dos valen lo mismo.
 ORIGENES_CORRECCION = ("web", "cli")
@@ -937,11 +942,13 @@ def insertar_acciones(
     """Da de alta las acciones nacidas en esta reunion, reconciliando si se reprocesa.
 
     Devuelve cuantas acciones de la reunion quedan registradas a partir de esta
-    respuesta del modelo (conservadas + nuevas). El detalle lo da
-    `reconciliar_acciones`.
+    respuesta del modelo (conservadas, pendientes de revisar y nuevas). El
+    detalle lo da `reconciliar_acciones`.
     """
     resultado = reconciliar_acciones(conn, meeting_id, acciones)
-    return resultado["conservadas"] + resultado["nuevas"]
+    return (
+        resultado["conservadas"] + resultado["revisar"] + resultado["nuevas"]
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1293,7 +1300,11 @@ def accion_protegida(conn: sqlite3.Connection, action_id: int) -> bool:
 
 
 def reconciliar_acciones(
-    conn: sqlite3.Connection, meeting_id: int, acciones: list[dict]
+    conn: sqlite3.Connection,
+    meeting_id: int,
+    acciones: list[dict],
+    *,
+    borrar_sin_pareja: bool = False,
 ) -> dict:
     """Sustituye al borrado en cascada de las acciones al reprocesar.
 
@@ -1302,7 +1313,10 @@ def reconciliar_acciones(
       modelo. `descripcion_llm` pasa a la nueva redaccion. Descartada o
       absorbida, sigue estandolo.
     - **Sin pareja y protegida**: se conserva con `revisar = 1`.
-    - **Sin pareja y sin proteger**: se borra, como antes.
+    - **Sin pareja y sin proteger**: por defecto tambien se conserva con
+      `revisar = 1`, para que un cambio de modelo o una parafrasis no borre
+      trabajo real. Con `borrar_sin_pareja=True` se recupera el borrado
+      anterior; el descarte definitivo lo decide una persona.
     - Lo que el modelo devuelve sin pareja se inserta como nuevo.
 
     En una reunion que se procesa por primera vez no hay nada que emparejar y
@@ -1348,7 +1362,7 @@ def reconciliar_acciones(
 
     for i in plan["sin_pareja"]:
         vieja = existentes[i]
-        if accion_protegida(conn, vieja["id"]):
+        if accion_protegida(conn, vieja["id"]) or not borrar_sin_pareja:
             conn.execute("UPDATE actions SET revisar = 1 WHERE id = ?", (vieja["id"],))
             resultado["revisar"] += 1
         else:
@@ -1365,6 +1379,8 @@ def simular_reconciliacion(
     meeting_id: int | None,
     acciones: list[dict],
     umbral: float = UMBRAL_RECONCILIACION,
+    *,
+    borrar_sin_pareja: bool = False,
 ) -> dict:
     """Lo que haria `reconciliar_acciones` al reprocesar, sin escribir nada.
 
@@ -1372,6 +1388,9 @@ def simular_reconciliacion(
     calibra `UMBRAL_RECONCILIACION`. Para cada existente sin pareja se da
     ademas su mejor candidata, aunque no llegue al umbral: es justo el dato
     que hace falta para saber si el umbral esta demasiado alto.
+
+    `borrar_sin_pareja` refleja el modo real: por defecto las acciones sin
+    pareja se quedan para revisar, y solo con ese flag se borrarian.
     """
     from difflib import SequenceMatcher
 
@@ -1395,6 +1414,7 @@ def simular_reconciliacion(
     sin_pareja = []
     for i in plan["sin_pareja"]:
         vieja = existentes[i]
+        protegida = accion_protegida(conn, vieja["id"])
         huella = _huella_texto(vieja["descripcion_llm"] or vieja["descripcion"])
         mejor = max(
             (
@@ -1408,7 +1428,8 @@ def simular_reconciliacion(
             {
                 "uid": vieja["uid"],
                 "guardada": vieja["descripcion_llm"] or vieja["descripcion"],
-                "protegida": accion_protegida(conn, vieja["id"]),
+                "protegida": protegida,
+                "se_borraria": borrar_sin_pareja and not protegida,
                 "mejor_candidata": mejor[1]["descripcion"] if mejor[1] else None,
                 "similitud": round(mejor[0], 3),
             }
@@ -2771,6 +2792,7 @@ def acciones_abiertas(
     conn: sqlite3.Connection,
     ultimas_reuniones: int = 5,
     excluir_meeting_id: int | None = None,
+    hasta_fecha: str | None = None,
 ) -> list[dict]:
     """Acciones vigentes sin cerrar vistas por ultima vez en las ultimas N reuniones.
 
@@ -2784,13 +2806,19 @@ def acciones_abiertas(
     ajenas se devuelven con el estado y las menciones **derivados sin ella**.
     Sin esto, una accion que la pasada anterior dio por completada no volveria
     a ofrecerse y el reproceso no seria idempotente.
+
+    `hasta_fecha` corta por la fecha de la reunion que se esta procesando. Sin
+    ese corte, reprocesar una daily antigua ofreceria como "arrastres" acciones
+    de reuniones **posteriores**, que el modelo no puede actualizar todavia y
+    que ademas podria dar por cerradas con informacion vieja.
     """
     recientes = {
         fila["id"]: fila["fecha"]
         for fila in conn.execute(
             "SELECT id, fecha FROM meetings WHERE id IS NOT ? "
+            "AND (? IS NULL OR fecha <= ?) "
             "ORDER BY fecha DESC, id DESC LIMIT ?",
-            (excluir_meeting_id, ultimas_reuniones),
+            (excluir_meeting_id, hasta_fecha, hasta_fecha, ultimas_reuniones),
         )
     }
     tocadas: set[int] = set()

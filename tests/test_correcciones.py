@@ -33,12 +33,17 @@ class Base(unittest.TestCase):
 
     # -- utilidades -------------------------------------------------------
 
-    def procesar(self, nombre, fecha, acciones=(), arrastres=()):
+    def procesar(self, nombre, fecha, acciones=(), arrastres=(), borrar_sin_pareja=False):
         """Lo mismo que hace `summarize_teams.guardar_en_bd` con las acciones."""
         meeting_id = memoria.crear_reunion(
             self.conn, fecha=fecha, transcript_path=f"/datos/{nombre}.txt"
         )
-        resultado = memoria.reconciliar_acciones(self.conn, meeting_id, list(acciones))
+        resultado = memoria.reconciliar_acciones(
+            self.conn,
+            meeting_id,
+            list(acciones),
+            borrar_sin_pareja=borrar_sin_pareja,
+        )
         memoria.aplicar_arrastres(self.conn, meeting_id, list(arrastres))
         self.conn.commit()
         return meeting_id, resultado
@@ -250,6 +255,26 @@ class TestEmparejar(unittest.TestCase):
         self.assertEqual(plan["sin_pareja"], [0])
         self.assertEqual(plan["nuevas"], [0])
 
+    def test_la_parafrasis_del_27b_entra_con_el_umbral_actual(self):
+        """Calibrado el 2026-11-09: esta pareja da 0,716; con 0,75 se perdia."""
+        existentes = [
+            {
+                "descripcion_llm": "Entregar todos los documentos hoy menos el "
+                "VCD (pendiente para el miercoles)"
+            }
+        ]
+        nuevas = [
+            {
+                "descripcion": "Entregar todos los documentos de la entrega salvo "
+                "VCD (hoy); VCD el miercoles"
+            }
+        ]
+        self.assertEqual(len(memoria.emparejar_acciones(existentes, nuevas)["parejas"]), 1)
+        self.assertEqual(
+            len(memoria.emparejar_acciones(existentes, nuevas, umbral=0.75)["parejas"]),
+            0,
+        )
+
     def test_exclusiva_y_desempate_por_responsable(self):
         existentes = [
             {"descripcion_llm": "Revisar el informe de Coverity", "persona": "Ana"},
@@ -400,7 +425,7 @@ class TestReproceso(Base):
         {"descripcion": "Revisar la wiki", "persona": "equipo"},
     ]
 
-    def reprocesar_jueves(self, acciones=None, arrastres=None):
+    def reprocesar_jueves(self, acciones=None, arrastres=None, borrar_sin_pareja=False):
         return self.procesar(
             "jueves",
             "2026-09-10",
@@ -410,6 +435,7 @@ class TestReproceso(Base):
                 if arrastres is None
                 else arrastres
             ),
+            borrar_sin_pareja=borrar_sin_pareja,
         )
 
     def test_reprocesar_conserva_las_cinco_cosas(self):
@@ -454,18 +480,31 @@ class TestReproceso(Base):
         )
         self.assertEqual(self.foto(), antes)
 
-    def test_protegida_sin_pareja_queda_para_revisar_y_la_otra_desaparece(self):
+    def test_sin_pareja_se_queda_para_revisar_por_defecto(self):
         self.poblar()
         memoria.anadir_dependencia(self.conn, self.diego, self.gcs)
         _, resultado = self.reprocesar_jueves(
             acciones=[{"descripcion": "Algo totalmente distinto", "persona": "Ana"}]
         )
-        self.assertEqual(resultado["revisar"], 1)
-        self.assertEqual(self.fila(self.diego)["revisar"], 1)
-        self.assertIsNone(self.fila(self.wiki), "sin proteger se borra, como antes")
-        self.assertIsNone(self.fila(self.uls2))
+        self.assertEqual(resultado["revisar"], 3)
+        self.assertEqual(resultado["borradas"], 0)
+        for uid in (self.diego, self.wiki, self.uls2):
+            self.assertEqual(self.fila(uid)["revisar"], 1)
         nueva = self.uid("Algo totalmente distinto")
-        self.assertNotIn(nueva, (self.wiki, self.uls2), "un uid borrado no se reutiliza")
+        self.assertNotIn(nueva, (self.wiki, self.uls2), "un uid nuevo no reutiliza otro")
+
+    def test_sin_pareja_se_borra_con_el_flag(self):
+        self.poblar()
+        memoria.anadir_dependencia(self.conn, self.diego, self.gcs)
+        _, resultado = self.reprocesar_jueves(
+            acciones=[{"descripcion": "Algo totalmente distinto", "persona": "Ana"}],
+            borrar_sin_pareja=True,
+        )
+        self.assertEqual(resultado["revisar"], 1)
+        self.assertEqual(resultado["borradas"], 2)
+        self.assertEqual(self.fila(self.diego)["revisar"], 1, "la protegida se queda")
+        self.assertIsNone(self.fila(self.wiki), "sin proteger se borra con el flag")
+        self.assertIsNone(self.fila(self.uls2))
 
     def test_una_pareja_posterior_quita_la_marca_de_revisar(self):
         self.poblar()
@@ -538,6 +577,16 @@ class TestReproceso(Base):
         self.assertEqual([p["uid"] for p in informe["parejas"]], [self.wiki])
         self.assertEqual(len(informe["sin_pareja"]), 2)
         self.assertEqual(informe["nuevas"], ["Otra cosa"])
+        self.assertFalse(any(s["se_borraria"] for s in informe["sin_pareja"]),
+                         "por defecto no se borra nada")
+
+        con_borrado = memoria.simular_reconciliacion(
+            self.conn,
+            jueves,
+            [{"descripcion": "Revisar la wiki"}, {"descripcion": "Otra cosa"}],
+            borrar_sin_pareja=True,
+        )
+        self.assertTrue(all(s["se_borraria"] for s in con_borrado["sin_pareja"]))
 
 
 # --------------------------------------------------------------------------
@@ -557,6 +606,19 @@ class TestArrastres(Base):
         self.assertNotIn(self.wiki, ofrecidas)
         self.assertNotIn(self.uls2, ofrecidas)
         self.assertIn(self.uls, ofrecidas)
+
+    def test_no_ofrece_acciones_de_reuniones_posteriores(self):
+        """Reprocesar una daily antigua no puede inyectar el futuro."""
+        todas = {a["uid"] for a in memoria.acciones_abiertas(self.conn, 5)}
+        solo_lunes = {
+            a["uid"]
+            for a in memoria.acciones_abiertas(
+                self.conn, 5, hasta_fecha="2026-09-07"
+            )
+        }
+        self.assertIn(self.diego, todas, "la del jueves esta en el historico")
+        self.assertNotIn(self.diego, solo_lunes, "no se ofrece al reprocesar el lunes")
+        self.assertIn(self.banda, solo_lunes, "la del lunes si se ofrece")
 
     def test_lleva_sus_dependencias_abiertas_y_la_descripcion_corregida(self):
         memoria.anadir_dependencia(self.conn, self.diego, self.gcs)

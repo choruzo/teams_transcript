@@ -734,21 +734,36 @@ def inferir_fecha(transcript_path: Path) -> str:
 
 
 def cargar_acciones_abiertas(
-    ruta_db: str | None, transcript_path: Path, ultimas_reuniones: int
+    ruta_db: str | None,
+    transcript_path: Path,
+    ultimas_reuniones: int,
+    fecha: str | None = None,
 ) -> dict[int, dict]:
     """Acciones abiertas de reuniones anteriores, indexadas por su id.
 
     Si esta transcripcion ya se proceso antes, su reunion se excluye: sus
     acciones propias desapareceran al reprocesar y las ajenas se devuelven
-    como estaban antes de aquella pasada.
+    como estaban antes de aquella pasada. Ademas se corta por la fecha de la
+    reunion (la guardada en la BD o, si es nueva, la que se va a guardar):
+    nunca se ofrecen acciones de reuniones posteriores.
     """
     conn = memoria.conectar(ruta_db)
     try:
         previa = memoria.id_reunion_por_transcripcion(
             conn, str(transcript_path.resolve())
         )
+        hasta = fecha
+        if previa is not None:
+            guardada = conn.execute(
+                "SELECT fecha FROM meetings WHERE id = ?", (previa,)
+            ).fetchone()
+            if guardada:
+                hasta = guardada["fecha"]
         filas = memoria.acciones_abiertas(
-            conn, ultimas_reuniones, excluir_meeting_id=previa
+            conn,
+            ultimas_reuniones,
+            excluir_meeting_id=previa,
+            hasta_fecha=hasta,
         )
     finally:
         conn.close()
@@ -766,6 +781,7 @@ def guardar_en_bd(
     segmentos: list[dict],
     modelo_llm: str,
     modelo_whisper: str | None,
+    borrar_sin_pareja: bool = False,
 ) -> tuple[int, dict]:
     """Vuelca el resumen y la transcripcion en SQLite. Devuelve (id, recuentos)."""
     duracion = None
@@ -799,12 +815,19 @@ def guardar_en_bd(
         # Las acciones antes que los arrastres: si se reprocesa, la
         # reconciliacion decide que filas de la pasada anterior sobreviven.
         reconciliacion = memoria.reconciliar_acciones(
-            conn, meeting_id, datos["acciones"]
+            conn,
+            meeting_id,
+            datos["acciones"],
+            borrar_sin_pareja=borrar_sin_pareja,
         )
         recuentos = {
             "segmentos": memoria.insertar_segmentos(conn, meeting_id, segmentos, mapa),
             "updates": memoria.insertar_updates(conn, meeting_id, datos["por_persona"]),
-            "acciones": reconciliacion["conservadas"] + reconciliacion["nuevas"],
+            "acciones": (
+                reconciliacion["conservadas"]
+                + reconciliacion["revisar"]
+                + reconciliacion["nuevas"]
+            ),
             "reconciliacion": reconciliacion,
             "riesgos": memoria.insertar_riesgos(conn, meeting_id, datos["riesgos"]),
             "arrastres": memoria.aplicar_arrastres(conn, meeting_id, datos["arrastres"]),
@@ -816,7 +839,10 @@ def guardar_en_bd(
 
 
 def simular_reconciliacion(
-    ruta_db: str | None, transcript_path: Path, datos: dict
+    ruta_db: str | None,
+    transcript_path: Path,
+    datos: dict,
+    borrar_sin_pareja: bool = False,
 ) -> dict:
     """Lo que haria el reproceso con las acciones de esta reunion, sin escribir."""
     conn = memoria.conectar(ruta_db)
@@ -824,7 +850,12 @@ def simular_reconciliacion(
         previa = memoria.id_reunion_por_transcripcion(
             conn, str(transcript_path.resolve())
         )
-        return memoria.simular_reconciliacion(conn, previa, datos["acciones"])
+        return memoria.simular_reconciliacion(
+            conn,
+            previa,
+            datos["acciones"],
+            borrar_sin_pareja=borrar_sin_pareja,
+        )
     finally:
         conn.close()
 
@@ -841,7 +872,7 @@ def imprimir_reconciliacion(informe: dict) -> None:
             f"        nueva:    {pareja['nueva']}"
         )
     for sola in informe["sin_pareja"]:
-        destino = "quedaria para revisar" if sola["protegida"] else "se borraria"
+        destino = "se borraria" if sola["se_borraria"] else "quedaria para revisar"
         print(f"  SIN PAREJA [{sola['uid']}] ({destino}): {sola['guardada']}")
         if sola["mejor_candidata"]:
             print(
@@ -1003,6 +1034,13 @@ def main() -> None:
         "el .md ni la base. Sirve para calibrar el umbral de reconciliacion",
     )
     parser.add_argument(
+        "--borrar-sin-pareja",
+        action="store_true",
+        help="Al reprocesar, borrar las acciones sin pareja no protegidas. "
+        "Por defecto se conservan con revisar=1 para que un cambio de modelo "
+        "no borre trabajo real",
+    )
+    parser.add_argument(
         "--fecha",
         default=None,
         help="Fecha de la reunion en ISO (por defecto se deduce del nombre del "
@@ -1066,7 +1104,7 @@ def main() -> None:
     if not args.sin_bd and not args.sin_arrastres and args.arrastres > 0:
         try:
             acciones_previas = cargar_acciones_abiertas(
-                args.db, transcript_path, args.arrastres
+                args.db, transcript_path, args.arrastres, fecha
             )
         except Exception as exc:  # sin arrastres se resume igual, solo peor
             print(
@@ -1117,7 +1155,14 @@ def main() -> None:
 
     datos = normalizar(datos, args.tipo, acciones_previas)
     if args.dry_run_reconciliacion:
-        imprimir_reconciliacion(simular_reconciliacion(args.db, transcript_path, datos))
+        imprimir_reconciliacion(
+            simular_reconciliacion(
+                args.db,
+                transcript_path,
+                datos,
+                borrar_sin_pareja=args.borrar_sin_pareja,
+            )
+        )
         return
     markdown = renderizar_markdown(datos, args.tipo, fecha, args.titulo)
     output_path.write_text(markdown, encoding="utf-8")
@@ -1136,6 +1181,7 @@ def main() -> None:
                 segmentos=segmentos,
                 modelo_llm=args.model,
                 modelo_whisper=args.modelo_whisper,
+                borrar_sin_pareja=args.borrar_sin_pareja,
             )
         except Exception as exc:  # el .md ya esta guardado; la BD es lo accesorio
             print(
