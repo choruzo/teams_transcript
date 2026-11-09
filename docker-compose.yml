@@ -18,7 +18,7 @@ services:
       # pero no deja guardar. Ponerlo a 0 conscientemente para corregir desde
       # la web; antes de la primera escritura de cada dia se copia la base en
       # datos/copias/ (TEAMS_COPIAS_DIAS dias, 7 por defecto).
-      TEAMS_API_SOLO_LECTURA: "1"
+      TEAMS_API_SOLO_LECTURA: "${TEAMS_API_SOLO_LECTURA:-1}"
       # Login (autenticacion.py). La base de usuarios vive junto a la de
       # reuniones, dentro del volumen `datos`, para que sobreviva a un
       # `docker compose up -d` y no viaje dentro de la imagen. El usuario

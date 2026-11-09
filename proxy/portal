@@ -173,6 +173,19 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
+    location /reservas/ {
+    # nginx envía el prefijo en X-Forwarded-Prefix y recorta "/reservas/"
+    # al hacer proxy_pass con URI ("/"). La app usa rutas relativas, así
+    # que el frontend funciona sin más reescritura.
+        proxy_pass http://127.0.0.1:8600/;
+        proxy_set_header Host $host;
+    	proxy_set_header X-Real-IP $remote_addr;
+    	proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    	proxy_set_header X-Forwarded-Proto $scheme;
+    	proxy_set_header X-Forwarded-Prefix /reservas;
+    }
+
+
     # ==========================================================
     # CI/CD GALTTCMC - Web UI (Flask + Gunicorn en 172.30.188.137:8080, HTTP)
     #
