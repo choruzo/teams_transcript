@@ -1139,6 +1139,17 @@ def indexar_acciones(
     }
 
 
+def hay_vectores_acciones(conn_idx: sqlite3.Connection) -> bool:
+    """Si el indice tiene algun vector de accion. Un indice viejo no lo tiene."""
+    try:
+        return (
+            conn_idx.execute("SELECT 1 FROM acciones_indexadas LIMIT 1").fetchone()
+            is not None
+        )
+    except sqlite3.OperationalError:
+        return False
+
+
 def cargar_vectores(conn_idx: sqlite3.Connection) -> dict[str, list[float]]:
     """Los vectores guardados, ya decodificados. Tolerante a filas corruptas."""
     vectores: dict[str, list[float]] = {}
@@ -1215,10 +1226,14 @@ def _fila_sugerencia(par: dict) -> dict:
         "a_descripcion": a.get("descripcion"),
         "a_persona": a.get("persona") or None,
         "a_estado": a.get("estado"),
+        "a_fecha": a.get("fecha"),
+        "a_meeting_uid": a.get("meeting_uid"),
         "b_uid": b["uid"],
         "b_descripcion": b.get("descripcion"),
         "b_persona": b.get("persona") or None,
         "b_estado": b.get("estado"),
+        "b_fecha": b.get("fecha"),
+        "b_meeting_uid": b.get("meeting_uid"),
         "similitud": round(par["similitud"], 4),
     }
 

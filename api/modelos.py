@@ -472,6 +472,49 @@ class Fusion(BaseModel):
     duplicada_uid: str
 
 
+class Sugerencia(BaseModel):
+    """Una pareja que el indice ve muy parecida (I11).
+
+    `a` y `b` son simetricos: no hay principal hasta que un humano lo decide.
+    La similitud es coseno entre los vectores de las descripciones, no una
+    probabilidad.
+    """
+
+    a_uid: str
+    a_descripcion: str
+    a_persona: str | None = None
+    a_estado: str
+    a_fecha: str | None = None
+    a_meeting_uid: str | None = None
+    b_uid: str
+    b_descripcion: str
+    b_persona: str | None = None
+    b_estado: str
+    b_fecha: str | None = None
+    b_meeting_uid: str | None = None
+    similitud: float
+
+
+class PaginaDeSugerencias(BaseModel):
+    """Las sugerencias y si el indice las puede calcular.
+
+    `disponible` no es decorativo: sin indice o sin vectores de acciones no hay
+    nada que proponer, y la web lo dice en vez de fingir que no hay duplicados.
+    """
+
+    disponible: bool
+    aviso: str | None = None
+    umbral: float
+    total: int
+    sugerencias: list[Sugerencia]
+
+
+class RechazoDeSugerencia(BaseModel):
+    a_uid: str
+    b_uid: str
+    creado_en: str
+
+
 class Persona(BaseModel):
     nombre: str
     alias: list[str]

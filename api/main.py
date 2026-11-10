@@ -37,6 +37,7 @@ from api.rutas import (  # noqa: E402
     personas,
     reuniones,
     salud,
+    sugerencias,
 )
 
 
@@ -81,6 +82,7 @@ api.include_router(acciones.router)
 api.include_router(personas.router)
 api.include_router(busqueda.router)
 api.include_router(chat.router)
+api.include_router(sugerencias.router)
 app.include_router(api)
 
 

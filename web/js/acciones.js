@@ -12,7 +12,7 @@
 
 import { api } from "./api.js";
 import { iniciarTema } from "./tema.js";
-import { escapar, plural } from "./formato.js";
+import { escapar, fechaCorta, nombreEstado, plural } from "./formato.js";
 import { dibujarEstados, dibujarTablero } from "./vistas/acciones.js";
 import {
   abrirDesdeTarjetas,
@@ -35,6 +35,7 @@ const CAMPOS = ["persona", "q", "dias_sin_tocar", "orden"];
 // abajo, no se salta a la página 4.
 let cargadas = [];
 let ultimo = null;
+let paginaSugerencias = null;
 
 function filtrosDeLaUrl() {
   const parametros = new URLSearchParams(window.location.search);
@@ -137,9 +138,113 @@ function parametros(filtros, desplazamiento = 0) {
 const panel = crearPanel({
   alCambiar: () => cargar({ conservar: true }),
   alSeleccionar: (uid) => marcarTarjeta($("#tablero"), uid),
+  alRechazarSugerencia: () => cargarSugerencias(filtrosDeLaUrl()),
   elementoDe: (uid) => botonDeTarjeta($("#tablero"), uid),
 });
 abrirDesdeTarjetas($("#tablero"), panel);
+// Las descripciones de las sugerencias abren el mismo panel que las tarjetas.
+abrirDesdeTarjetas($("#sugerencias"), panel);
+
+// --------------------------------------------------------------------------
+// Posibles duplicados (I11)
+// --------------------------------------------------------------------------
+
+function dibujarSugerencias() {
+  const contenedor = $("#sugerencias");
+  const contador = $("#n-sugerencias");
+  if (!paginaSugerencias) {
+    contenedor.innerHTML = '<div class="aviso">Cargando…</div>';
+    return;
+  }
+  contador.textContent = paginaSugerencias.total ? `(${paginaSugerencias.total})` : "";
+  if (!paginaSugerencias.disponible) {
+    contenedor.innerHTML = `<div class="aviso">${escapar(
+      paginaSugerencias.aviso || "Sin índice semántico."
+    )}</div>`;
+    return;
+  }
+  if (!paginaSugerencias.sugerencias.length) {
+    contenedor.innerHTML =
+      '<div class="aviso">Ninguna pareja por encima del umbral.</div>';
+    return;
+  }
+  const lado = (s) => `
+    <button type="button" class="abrir-ficha" data-abrir-ficha="${escapar(s.uid)}">${escapar(
+      s.descripcion
+    )}</button>
+    <span class="tenue">${escapar(s.persona || "sin responsable")}${
+      s.fecha ? ` · ${escapar(fechaCorta(s.fecha))}` : ""
+    } · ${escapar(nombreEstado(s.estado))}</span>`;
+  contenedor.innerHTML = `
+    <ul class="sugerencias">
+      ${paginaSugerencias.sugerencias
+        .map(
+          (s) => `
+          <li class="sugerencia">
+            <div class="sugerencia-par">
+              <div>${lado({
+                uid: s.a_uid,
+                descripcion: s.a_descripcion,
+                persona: s.a_persona,
+                fecha: s.a_fecha,
+                estado: s.a_estado,
+              })}</div>
+              <span class="similitud" title="similitud coseno">${Math.round(
+                s.similitud * 100
+              )}%</span>
+              <div>${lado({
+                uid: s.b_uid,
+                descripcion: s.b_descripcion,
+                persona: s.b_persona,
+                fecha: s.b_fecha,
+                estado: s.b_estado,
+              })}</div>
+            </div>
+            <div class="sugerencia-acciones">
+              <button type="button" class="mini" data-rechazar
+                      data-a="${escapar(s.a_uid)}" data-b="${escapar(s.b_uid)}"
+                      title="No volverá a proponerse, ni al reconstruir el índice">No es la misma</button>
+            </div>
+          </li>`
+        )
+        .join("")}
+    </ul>`;
+}
+
+/**
+ * Pide las sugerencias con el mismo responsable/texto que la lista, no con el
+ * estado: solo se comparan acciones abiertas y una accion cerrada no se fusiona.
+ */
+async function cargarSugerencias(filtros) {
+  try {
+    paginaSugerencias = await api.sugerencias({ persona: filtros.persona, q: filtros.q });
+  } catch (error) {
+    paginaSugerencias = {
+      disponible: false,
+      aviso: error.message,
+      total: 0,
+      sugerencias: [],
+    };
+  }
+  dibujarSugerencias();
+}
+
+$("#sugerencias").addEventListener("click", async (evento) => {
+  const boton = evento.target.closest("[data-rechazar]");
+  if (!boton || boton.disabled) return;
+  boton.disabled = true;
+  $("#mensaje-sugerencias").innerHTML = "";
+  try {
+    await api.rechazarSugerencia(boton.dataset.a, boton.dataset.b);
+    $("#mensaje-sugerencias").innerHTML =
+      '<p class="nota">Anotado: esas dos acciones no son la misma.</p>';
+    await cargarSugerencias(filtrosDeLaUrl());
+  } catch (error) {
+    $("#mensaje-sugerencias").innerHTML = `
+      <p class="aviso error">${escapar(error.message)}</p>`;
+    boton.disabled = false;
+  }
+});
 
 function pintar(filtros) {
   dibujarTablero($("#tablero"), ultimo, cargadas);
@@ -173,6 +278,7 @@ function pintar(filtros) {
 async function cargar({ conservar = false } = {}) {
   const filtros = filtrosDeLaUrl();
   volcarEnElFormulario(filtros);
+  cargarSugerencias(filtros);
   if (!conservar) $("#tablero").innerHTML = '<div class="aviso">Cargando…</div>';
   const posicion = window.scrollY;
   try {

@@ -77,6 +77,19 @@
       <button type="button" id="limpiar">Limpiar</button>
     </form>
 
+    <section class="bloque" id="bloque-sugerencias" aria-labelledby="t-sugerencias">
+      <h2 id="t-sugerencias">Posibles duplicados <span id="n-sugerencias"></span></h2>
+      <p class="nota">Parejas que el índice semántico ve muy parecidas. Nunca se
+        fusionan solas: pulsa una descripción para abrir la ficha y decidir, o
+        marca <b>No es la misma</b> para que no vuelva a proponerse. Solo se
+        comparan acciones abiertas; el filtro de responsable y texto también se
+        aplica aquí.</p>
+      <div id="mensaje-sugerencias" aria-live="polite"></div>
+      <div id="sugerencias">
+        <div class="aviso">Cargando…</div>
+      </div>
+    </section>
+
     <section class="bloque" aria-labelledby="t-tablero">
       <h2 id="t-tablero">Acciones <span id="total"></span></h2>
       <p class="nota">Todo el histórico, con el estado que la base da por bueno

@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import autenticacion  # noqa: E402
 import memoria  # noqa: E402
+import rag  # noqa: E402
 
 try:
     from fastapi.testclient import TestClient
@@ -1351,6 +1352,180 @@ class TestAutenticacionAPI(BaseAPI):
             "/api/login", json={"usuario": "admin", "clave": "admin"}
         )
         self.assertEqual(respuesta.status_code, 200)
+
+
+class TestSugerencias(BaseAPI):
+    """I11: la lista del tablero y la del panel leen el indice ya calculado."""
+
+    def setUp(self):
+        super().setUp()
+        self.indice = Path(self._tmp.name) / "indice.db"
+        self._indice_previo = os.environ.get(rag.VARIABLE_ENTORNO)
+        os.environ[rag.VARIABLE_ENTORNO] = str(self.indice)
+        self.addCleanup(self._restaurar_indice)
+        conn = memoria.conectar(self.db)
+        lunes = memoria.crear_reunion(
+            conn, fecha="2026-09-07", transcript_path="/datos/lunes.txt"
+        )
+        jueves = memoria.crear_reunion(
+            conn, fecha="2026-09-10", transcript_path="/datos/jueves.txt"
+        )
+        memoria.insertar_acciones(
+            conn,
+            lunes,
+            [{"descripcion": "Cerrar el certificado de eqsim", "persona": "Ana"}],
+        )
+        memoria.insertar_acciones(
+            conn,
+            jueves,
+            [{"descripcion": "Cerrar certificado de eqsim", "persona": "Pablo"}],
+        )
+        conn.commit()
+        self.a, self.b = [
+            fila[0] for fila in conn.execute("SELECT uid FROM actions ORDER BY id")
+        ]
+        conn_idx = rag.conectar(self.indice)
+        rag.indexar_acciones(
+            conn_idx,
+            conn,
+            embebedor=lambda textos: [[1.0, 0.0] for _ in textos],
+            modelo="falso",
+        )
+        conn_idx.close()
+        conn.close()
+
+    def _restaurar_indice(self):
+        if self._indice_previo is None:
+            os.environ.pop(rag.VARIABLE_ENTORNO, None)
+        else:
+            os.environ[rag.VARIABLE_ENTORNO] = self._indice_previo
+
+    def test_lista_las_parejas_del_indice(self):
+        respuesta = self.cliente.get("/api/sugerencias")
+        self.assertEqual(respuesta.status_code, 200, respuesta.text)
+        datos = respuesta.json()
+        self.assertTrue(datos["disponible"])
+        self.assertIsNone(datos["aviso"])
+        self.assertEqual(datos["total"], 1)
+        self.assertAlmostEqual(datos["umbral"], rag.UMBRAL_SUGERENCIA)
+        pareja = datos["sugerencias"][0]
+        self.assertEqual({pareja["a_uid"], pareja["b_uid"]}, {self.a, self.b})
+        self.assertGreater(pareja["similitud"], 0.99)
+        self.assertEqual(pareja["a_fecha"], "2026-09-07")
+
+    def test_la_pareja_sale_tambien_en_la_ficha_de_cada_accion(self):
+        for uid in (self.a, self.b):
+            datos = self.cliente.get(f"/api/acciones/{uid}/sugerencias").json()
+            self.assertEqual(datos["total"], 1)
+            pareja = datos["sugerencias"][0]
+            self.assertIn(uid, (pareja["a_uid"], pareja["b_uid"]))
+
+    def test_filtros_de_responsable_y_texto(self):
+        self.assertEqual(
+            self.cliente.get("/api/sugerencias?persona=Ana").json()["total"], 1
+        )
+        self.assertEqual(
+            self.cliente.get("/api/sugerencias?persona=Nadie").json()["total"], 0
+        )
+        self.assertEqual(
+            self.cliente.get("/api/sugerencias?q=certificado").json()["total"], 1
+        )
+        self.assertEqual(
+            self.cliente.get("/api/sugerencias?q=otra-cosa").json()["total"], 0
+        )
+
+    def test_sin_indice_lo_dice_y_no_se_cae(self):
+        os.environ[rag.VARIABLE_ENTORNO] = str(Path(self._tmp.name) / "no-existe.db")
+        respuesta = self.cliente.get("/api/sugerencias")
+        self.assertEqual(respuesta.status_code, 200, respuesta.text)
+        datos = respuesta.json()
+        self.assertFalse(datos["disponible"])
+        self.assertIn("--acciones", datos["aviso"])
+
+    def test_indice_sin_vectores_de_acciones_lo_dice(self):
+        os.environ[rag.VARIABLE_ENTORNO] = str(Path(self._tmp.name) / "vacio.db")
+        rag.conectar(rag.ruta_indice()).close()
+        datos = self.cliente.get("/api/sugerencias").json()
+        self.assertFalse(datos["disponible"])
+        self.assertIn("--acciones", datos["aviso"])
+
+
+class TestRechazarSugerencia(BaseAPI):
+    def setUp(self):
+        super().setUp()
+        self._lectura_previa = os.environ.get("TEAMS_API_SOLO_LECTURA")
+        os.environ["TEAMS_API_SOLO_LECTURA"] = "0"
+        self.addCleanup(self._restaurar_lectura)
+        self.indice = Path(self._tmp.name) / "indice.db"
+        self._indice_previo = os.environ.get(rag.VARIABLE_ENTORNO)
+        os.environ[rag.VARIABLE_ENTORNO] = str(self.indice)
+        self.addCleanup(self._restaurar_indice)
+
+        conn = memoria.conectar(self.db)
+        lunes = memoria.crear_reunion(
+            conn, fecha="2026-09-07", transcript_path="/datos/lunes.txt"
+        )
+        jueves = memoria.crear_reunion(
+            conn, fecha="2026-09-10", transcript_path="/datos/jueves.txt"
+        )
+        memoria.insertar_acciones(
+            conn,
+            lunes,
+            [{"descripcion": "Cerrar el certificado de eqsim", "persona": "Ana"}],
+        )
+        memoria.insertar_acciones(
+            conn,
+            jueves,
+            [{"descripcion": "Cerrar certificado de eqsim", "persona": "Pablo"}],
+        )
+        conn.commit()
+        self.a, self.b = [
+            fila[0] for fila in conn.execute("SELECT uid FROM actions ORDER BY id")
+        ]
+        conn_idx = rag.conectar(self.indice)
+        rag.indexar_acciones(
+            conn_idx,
+            conn,
+            embebedor=lambda textos: [[1.0, 0.0] for _ in textos],
+            modelo="falso",
+        )
+        conn_idx.close()
+        conn.close()
+
+    def _restaurar_lectura(self):
+        if self._lectura_previa is None:
+            os.environ.pop("TEAMS_API_SOLO_LECTURA", None)
+        else:
+            os.environ["TEAMS_API_SOLO_LECTURA"] = self._lectura_previa
+
+    def _restaurar_indice(self):
+        if self._indice_previo is None:
+            os.environ.pop(rag.VARIABLE_ENTORNO, None)
+        else:
+            os.environ[rag.VARIABLE_ENTORNO] = self._indice_previo
+
+    def test_rechazar_quita_la_pareja_y_es_idempotente(self):
+        respuesta = self.cliente.post(f"/api/sugerencias/{self.a}/{self.b}/rechazar")
+        self.assertEqual(respuesta.status_code, 200, respuesta.text)
+        self.assertEqual(
+            {respuesta.json()["a_uid"], respuesta.json()["b_uid"]}, {self.a, self.b}
+        )
+        self.assertEqual(self.cliente.get("/api/sugerencias").json()["total"], 0)
+        # Repetirlo no falla: es la misma decision.
+        self.assertEqual(
+            self.cliente.post(f"/api/sugerencias/{self.b}/{self.a}/rechazar").status_code,
+            200,
+        )
+
+    def test_un_uid_inexistente_da_404(self):
+        respuesta = self.cliente.post(f"/api/sugerencias/{self.a}/no-existe/rechazar")
+        self.assertEqual(respuesta.status_code, 404)
+
+    def test_solo_lectura_da_403(self):
+        os.environ["TEAMS_API_SOLO_LECTURA"] = "1"
+        respuesta = self.cliente.post(f"/api/sugerencias/{self.a}/{self.b}/rechazar")
+        self.assertEqual(respuesta.status_code, 403)
+        self.assertIn("TEAMS_API_SOLO_LECTURA", respuesta.json()["detail"])
 
 
 if __name__ == "__main__":

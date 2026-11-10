@@ -126,10 +126,18 @@ const primeraMencion = (f) =>
  * - `alAlternar(abierto)`: al abrir o cerrar; el timeline se redibuja porque
  *   en pantallas anchas el panel le quita sitio en vez de taparlo.
  * - `alSeleccionar(uid|null)`: la acción abierta cambia, para marcarla.
+ * - `alRechazarSugerencia()`: se ha anotado que dos acciones no son la misma;
+ *   el tablero recarga su lista de sugerencias sin esperar a navegar.
  * - `elementoDe(uid)`: a dónde devolver el foco al cerrar, si el elemento que
  *   lo abrió ya no existe porque la página se ha repintado.
  */
-export function crearPanel({ alCambiar, alAlternar, alSeleccionar, elementoDe } = {}) {
+export function crearPanel({
+  alCambiar,
+  alAlternar,
+  alSeleccionar,
+  alRechazarSugerencia,
+  elementoDe,
+} = {}) {
   const aside = document.createElement("aside");
   aside.className = "panel-accion";
   aside.setAttribute("aria-labelledby", "pa-titulo");
@@ -151,6 +159,8 @@ export function crearPanel({ alCambiar, alAlternar, alSeleccionar, elementoDe } 
     escritura: null, // null: aún no se sabe
     personas: null,
     fusion: null, // { candidata } mientras se elige la principal
+    sugerencias: [], // posibles duplicados de la accion abierta (I11)
+    avisoSugerencias: null,
   };
 
   // ------------------------------------------------------------------ datos
@@ -171,6 +181,25 @@ export function crearPanel({ alCambiar, alAlternar, alSeleccionar, elementoDe } 
     } catch (_) {
       estado.personas = [];
     }
+  }
+
+  /** Las sugerencias de una accion. Un fallo se enseña, no tumba la ficha. */
+  async function pedirSugerencias(uid) {
+    try {
+      return await api.sugerenciasDe(uid);
+    } catch (error) {
+      return { sugerencias: [], aviso: error.message };
+    }
+  }
+
+  async function refrescarSugerencias() {
+    const uid = estado.uid;
+    if (!uid) return;
+    const pagina = await pedirSugerencias(uid);
+    if (estado.uid !== uid) return; // se abrio otra mientras tanto
+    estado.sugerencias = pagina.sugerencias || [];
+    estado.avisoSugerencias = pagina.aviso || null;
+    pintar();
   }
 
   // -------------------------------------------------------------- mensajes
@@ -334,6 +363,58 @@ export function crearPanel({ alCambiar, alAlternar, alSeleccionar, elementoDe } 
       </section>`;
   }
 
+  function seccionSugerencias(f, bloqueado) {
+    const parejas = estado.sugerencias;
+    if (!parejas.length && !estado.avisoSugerencias) return "";
+    const filas = parejas
+      .map((s) => {
+        const esA = s.a_uid === f.uid;
+        const otra = esA
+          ? {
+              uid: s.b_uid,
+              descripcion: s.b_descripcion,
+              persona: s.b_persona,
+              estado: s.b_estado,
+              fecha: s.b_fecha,
+            }
+          : {
+              uid: s.a_uid,
+              descripcion: s.a_descripcion,
+              persona: s.a_persona,
+              estado: s.a_estado,
+              fecha: s.a_fecha,
+            };
+        const cuando = otra.fecha
+          ? ` · nace el ${escapar(fechaCorta(otra.fecha))}`
+          : "";
+        return `
+          <li>
+            <div><b>${Math.round(s.similitud * 100)}%</b> —
+              <button type="button" class="enlace" data-abrir="${escapar(otra.uid)}">${escapar(otra.descripcion)}</button>
+            </div>
+            <div class="tenue">${escapar(otra.persona || "sin responsable")} ·
+              ${escapar(nombreEstado(otra.estado))}${cuando}</div>
+            <div class="pa-botones">
+              <button type="button" class="primario" data-hacer="fusionar-sugerencia"
+                      data-uid="${escapar(otra.uid)}" ${bloqueado}>Fusionar…</button>
+              <button type="button" class="secundario" data-hacer="rechazar-sugerencia"
+                      data-uid="${escapar(otra.uid)}" ${bloqueado}>No es la misma</button>
+            </div>
+          </li>`;
+      })
+      .join("");
+    return `
+      <section class="pa-seccion pa-sugerencias">
+        <h3>Posible duplicado</h3>
+        <p class="tenue">El motor propone; la fusión la decides tú. «No es la
+          misma» no vuelve a proponerse.</p>
+        ${estado.avisoSugerencias
+          ? `<p class="pa-nota tenue">${escapar(estado.avisoSugerencias)}</p>`
+          : ""}
+        ${filas ? `<ul class="pa-lista">${filas}</ul>` : '<p class="vacio">Ninguna pareja por encima del umbral.</p>'}
+      </section>`;
+  }
+
   function relacionadas(lista, sentido, f, bloqueado) {
     if (!lista.length) return `<p class="vacio">Ninguna.</p>`;
     return `<ul class="pa-lista">${lista
@@ -428,6 +509,7 @@ export function crearPanel({ alCambiar, alAlternar, alSeleccionar, elementoDe } 
     $(".pa-cuerpo").innerHTML = `
       ${soloLectura}
       ${cabecera(f)}
+      ${seccionSugerencias(f, bloqueado)}
       ${seccionEdicion(f, bloqueado)}
       ${seccionDescarte(f, bloqueado)}
       ${seccionFusion(f, bloqueado)}
@@ -534,6 +616,9 @@ export function crearPanel({ alCambiar, alAlternar, alSeleccionar, elementoDe } 
       estado.personas = null;
       cargarPersonas().then(volcarPersonas);
       alCambiar?.(estado.ficha);
+      // Fusionar o corregir puede cambiar las parejas que le quedan a esta
+      // accion; se piden otra vez sin cerrar el panel.
+      refrescarSugerencias().catch(() => {});
     } catch (error) {
       if (error.estado === 409) {
         try {
@@ -544,6 +629,28 @@ export function crearPanel({ alCambiar, alAlternar, alSeleccionar, elementoDe } 
         }
         alCambiar?.(estado.ficha);
       }
+      mensajeDeError(error);
+    } finally {
+      aside.removeAttribute("aria-busy");
+    }
+  }
+
+  /**
+   * Rechaza una pareja. No pasa por `escribir` porque no devuelve una ficha:
+   * no cambia la accion, solo anota que ese par no es el mismo.
+   */
+  async function rechazarSugerencia(otra) {
+    const f = estado.ficha;
+    aside.setAttribute("aria-busy", "true");
+    try {
+      await api.rechazarSugerencia(f.uid, otra);
+      estado.sugerencias = estado.sugerencias.filter(
+        (s) => s.a_uid !== otra && s.b_uid !== otra
+      );
+      pintar();
+      mensaje("Anotado: esas dos acciones no son la misma.", "bien");
+      alRechazarSugerencia?.();
+    } catch (error) {
       mensajeDeError(error);
     } finally {
       aside.removeAttribute("aria-busy");
@@ -627,7 +734,7 @@ export function crearPanel({ alCambiar, alAlternar, alSeleccionar, elementoDe } 
           (${reunionesDe(fichaPrincipal)} + ${reunionesDe(duplicada)}
           sin repetir). Conserva el responsable y el estado de la principal.</p>
         <div class="pa-botones">
-          <button type="button" class="primario" data-hacer="fusionar">Fusionar</button>
+          <button type="button" class="primario" data-hacer="fusionar" ${estado.escritura ? "" : "disabled"}>Fusionar</button>
           <button type="button" class="secundario" data-hacer="cancelar-fusion">Cancelar</button>
         </div>
       </div>`;
@@ -646,6 +753,8 @@ export function crearPanel({ alCambiar, alAlternar, alSeleccionar, elementoDe } 
     estado.uid = uid;
     estado.origen = origen;
     estado.fusion = null;
+    estado.sugerencias = [];
+    estado.avisoSugerencias = null;
     mensaje("");
     aside.hidden = false;
     document.body.classList.add("con-panel");
@@ -653,13 +762,16 @@ export function crearPanel({ alCambiar, alAlternar, alSeleccionar, elementoDe } 
     $(".pa-cuerpo").innerHTML = `<div class="aviso">Cargando…</div>`;
     if (primeraVez) alAlternar?.(true);
     try {
-      const [ficha] = await Promise.all([
+      const [ficha, paginaSugerencias] = await Promise.all([
         api.ficha(uid),
+        pedirSugerencias(uid),
         saberSiSePuedeEscribir(),
         cargarPersonas(),
       ]);
       if (estado.uid !== uid) return; // se abrió otra mientras tanto
       estado.ficha = ficha;
+      estado.sugerencias = paginaSugerencias.sugerencias || [];
+      estado.avisoSugerencias = paginaSugerencias.aviso || null;
       pintar();
     } catch (error) {
       $(".pa-cuerpo").innerHTML = `
@@ -749,6 +861,13 @@ export function crearPanel({ alCambiar, alAlternar, alSeleccionar, elementoDe } 
     if (!boton || boton.disabled) return;
     const f = estado.ficha;
     switch (boton.dataset.hacer) {
+      case "fusionar-sugerencia":
+        await prepararFusion(boton.dataset.uid);
+        $("#pa-previa")?.scrollIntoView({ block: "nearest" });
+        break;
+      case "rechazar-sugerencia":
+        rechazarSugerencia(boton.dataset.uid);
+        break;
       case "pedir-descarte":
         $("#pa-descarte").innerHTML = `
           <label class="pa-campo">

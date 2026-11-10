@@ -384,6 +384,12 @@ positivos. Se recalibra con `--dry-run` si cambia el modelo. Sin índice, sin
 modelo o sin `indexar_teams.py --acciones`, no hay sugerencias y se dice; el
 resto de la corrección funciona igual.
 
+En la web, el **tablero** enseña arriba las parejas pendientes (filtradas por
+el responsable y el texto que se estén mirando) y el **panel** de cada acción
+enseña su «posible duplicado» con *Fusionar…* y *No es la misma*. Fusionar abre
+la misma vista previa de la fusión manual; rechazar la pareja no vuelve a
+proponerla ni siquiera al reconstruir el índice. Nunca se fusiona sola.
+
 ## Uso: informes agregados (`report_teams.py`)
 
 Mientras `ask_teams.py` responde a una pregunta concreta, esto saca la foto

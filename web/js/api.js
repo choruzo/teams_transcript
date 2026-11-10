@@ -82,10 +82,10 @@ export const etiquetaDeFicha = (ficha) => `"${ficha.uid}:${ficha.version}"`;
  * 409 en vez de pisarla.
  */
 async function escribir(metodo, ruta, ficha, cuerpo) {
-  const opciones = {
-    method: metodo,
-    headers: { "If-Match": etiquetaDeFicha(ficha) },
-  };
+  const opciones = { method: metodo, headers: {} };
+  // Las sugerencias se rechazan sin `If-Match`: no cambian una accion, solo
+  // anotan que ese par no es el mismo. Las escrituras de accion si lo llevan.
+  if (ficha) opciones.headers["If-Match"] = etiquetaDeFicha(ficha);
   if (cuerpo !== undefined) {
     opciones.headers["Content-Type"] = "application/json";
     opciones.body = JSON.stringify(cuerpo);
@@ -135,6 +135,16 @@ export const api = {
   // El tablero (I3). Devuelve la página **y** los recuentos con los que
   // contrastarla, para que los controles de filtro sepan qué ofrecen.
   acciones: (filtros) => pedir("/acciones", filtros),
+  // Sugerencias de duplicados (I11). La lista del tablero y la de una accion
+  // concreta; el motor ya decidio las parejas, aqui solo se leen.
+  sugerencias: (filtros) => pedir("/sugerencias", filtros),
+  sugerenciasDe: (uid) => pedir(`${accion(uid)}/sugerencias`),
+  rechazarSugerencia: (a, b) =>
+    escribir(
+      "POST",
+      `/sugerencias/${encodeURIComponent(a)}/${encodeURIComponent(b)}/rechazar`,
+      null
+    ),
   // La búsqueda (I4). `q` es texto libre: la API lo traduce a sintaxis FTS5 y
   // devuelve en `consulta_fts` cómo lo entendió, que es lo que permite
   // explicar un resultado raro sin adivinar.

@@ -732,7 +732,7 @@ pendientes de decidir, y ninguna bloquea el arranque:
 | 10 | **I9 — Constelación 3D** | 3.7, si se decide hacerla | Medio | I1 |
 | 11 | **I10a — Re-resumir** | primer nivel de 3.8: relanzar el resumen sobre un `.txt` existente | Bajo | I2, D0 |
 | 12 | **I10b — Subir y transcribir** | segundo nivel de 3.8: cola `jobs`, trabajador systemd en el host, SSE de progreso | **Alto** | I10a |
-| 13 | **I11 — Sugerencias de duplicados** | en el panel, «posible duplicado de…» con *Fusionar* / *No es la misma*; lista de pendientes en el tablero | Bajo | I6a, ~~Fase 8 del motor~~ **hecha (2026-11-10)** |
+| ~~13~~ | ~~**I11 — Sugerencias de duplicados**~~ **hecha (2026-11-10)** | en el panel, «posible duplicado de…» con *Fusionar* / *No es la misma*; lista de pendientes en el tablero | Bajo | I6a, ~~Fase 8 del motor~~ **hecha (2026-11-10)** |
 
 **Dependencia crítica de I6a:** igual que I5 con la Fase 4, no se escribe
 un solo endpoint de escritura antes de que la Fase 7 del motor esté hecha y
@@ -1365,6 +1365,50 @@ de reunión, el tablero en tema claro y el modo solo lectura a 420 px.
 **Pendiente del criterio de aceptación:** reprocesar las dos dailys en el
 servidor y comprobar que las cuatro correcciones sobreviven. El motor lo tiene
 cubierto con tests (Fase 7), pero no se ha hecho sobre la base real.
+
+---
+
+## 9 decies. Resultado de I11 (2026-11-10)
+
+Ficheros: `api/rutas/sugerencias.py` (nuevo), `api/modelos.py`, `api/main.py`,
+`rag.py` (fechas en la sugerencia y `hay_vectores_acciones`), `web/js/api.js`,
+`web/js/acciones.js`, `web/js/vistas/panel_accion.js`, `web/acciones.html`,
+`web/css/estilo.css`; tests en `tests/test_api.py` y
+`tests/test_sugerencias.py`.
+
+Decisiones tomadas al implementarla:
+
+1. **La API no calcula parejas**: `GET /api/sugerencias` y
+   `GET /api/acciones/{uid}/sugerencias` leen `rag.parejas_similares`; el
+   rechazo delega en `memoria.rechazar_sugerencia`. Ni el umbral ni las reglas
+   se duplican en la capa web.
+2. **La misma lista en el tablero y en el panel**: el panel filtra la lista
+   global (una sugerencia por acción) por el uid abierto. Si la calculara aparte,
+   la misma acción propondría cosas distintas según por dónde se llegue.
+3. **El tablero filtra por responsable y texto, no por estado**: las
+   sugerencias son siempre entre acciones abiertas. El filtro no decide parejas:
+   solo descarta las que no tocan lo que se está mirando.
+4. **Rechazar no exige `If-Match`**: no cambia la acción, solo anota un par
+   idempotente en `sugerencias_rechazadas` (esquema 5). Con
+   `TEAMS_API_SOLO_LECTURA` activo da 403 como el resto de escrituras.
+5. **«Fusionar…» reutiliza la vista previa de I6a**: abre `prepararFusion`, con
+   la principal más antigua preseleccionada y confirmación. No hay una segunda
+   vía de fusión ni un botón que fusione sin mirar.
+6. **Sin índice se dice, no se cae**: `disponible:false` y un `aviso` que pide
+   `indexar_teams.py --acciones`, tanto si falta el fichero como si no tiene
+   vectores. El tablero enseña ese aviso en vez de una lista vacía muda.
+
+**Verificado en el navegador** con una copia de la base real del servidor (14
+reuniones, 139 acciones, 115 abiertas) y los vectores de `bge-m3`: el tablero
+enseña las 6 parejas del umbral 0,74; el panel de una acción enseña su «posible
+duplicado»; «Fusionar…» abre la vista previa y la fusión real deja el par fuera
+del tablero; «No es la misma» lo hace desaparecer sin recargar la página; y
+tras **reconstruir el índice entero** (`indexar_teams.py --acciones
+--reconstruir`, 382 fragmentos y 139 acciones) los rechazos siguen vigentes
+(la lista baja de 6 a 2 y no vuelven los pares rechazados).
+
+**Pendiente:** nada de I11. El panel no enseña los títulos de las reuniones de
+cada lado (solo la fecha); la ficha sí los tiene al abrir la acción.
 
 ---
 
