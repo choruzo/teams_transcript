@@ -356,6 +356,34 @@ transcripciones en castellano la recuperación empeora mucho sin dar ningún
 error. Si cambias de modelo, hay que reconstruir el índice —el CLI se niega a
 mezclar vectores de dos modelos, que es un fallo silencioso—.
 
+### Sugerencias de duplicados
+
+El mismo índice guarda también un vector de cada acción, para proponer parejas
+que probablemente sean la misma tarea contada en dos reuniones. **Nunca fusiona
+solo**: la decisión es humana y pasa por el panel de corrección (I6a) o por
+`memoria.fusionar_acciones`.
+
+```powershell
+# Calcula los vectores de las acciones (y mantiene los de las transcripciones)
+.\.venv\Scripts\python.exe indexar_teams.py --acciones
+
+# Mide el umbral: enseña las parejas reales y, aparte, las fusiones que ya
+# hiciste a mano, aunque queden por debajo del umbral. No escribe nada.
+.\.venv\Scripts\python.exe indexar_teams.py --acciones --dry-run
+
+# "Estas dos no son la misma": el rechazo vive en meetings.db y sobrevive a
+# reconstruir el índice.
+.\.venv\Scripts\python.exe memoria.py --rechazar-sugerencia UID_A UID_B
+```
+
+El paso de indexado de `procesar_teams.py` ya recalcula estos vectores. El
+umbral por defecto (`rag.UMBRAL_SUGERENCIA = 0.74`) está **medido** sobre el
+servidor con `bge-m3` y 115 acciones abiertas: con él salen 6 parejas, casi
+todas duplicados claros. A 0,75 se pierde una y a 0,73 empiezan los falsos
+positivos. Se recalibra con `--dry-run` si cambia el modelo. Sin índice, sin
+modelo o sin `indexar_teams.py --acciones`, no hay sugerencias y se dice; el
+resto de la corrección funciona igual.
+
 ## Uso: informes agregados (`report_teams.py`)
 
 Mientras `ask_teams.py` responde a una pregunta concreta, esto saca la foto
@@ -374,6 +402,9 @@ bloqueo se repite reunión tras reunión y quién lleva tiempo sin dar novedades
 
 # Solo los números, sin pedirle nada al LLM
 .\.venv\Scripts\python.exe report_teams.py --semanal --sin-llm
+
+# Añade los posibles duplicados ya calculados por el índice
+.\.venv\Scripts\python.exe report_teams.py --semanal --sugerencias
 ```
 
 **Todas las cifras salen de SQL y el LLM solo escribe la lectura en prosa que
@@ -387,6 +418,10 @@ a secas: que las acciones son el estado de hoy y no el del periodo, que la
 fecha de cierre es la del procesado de la reunión, que los bloqueos se agrupan
 por texto idéntico (uno contado con otras palabras no se detecta) y que sin
 una lista del equipo no se puede saber quién falta y no ha hablado nunca.
+
+Con `--sugerencias` añade una sección de **posibles duplicados**, ya calculados
+en el índice (no llama al modelo): parejas probables, nunca confirmadas, con su
+similitud y el aviso de que la fusión se decide a mano.
 
 Con `--referencia AAAA-MM-DD` los atajos `--semanal`/`--mensual` se calculan
 sobre otro día, que es la forma de sacar el informe de la semana pasada.

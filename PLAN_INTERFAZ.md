@@ -732,7 +732,7 @@ pendientes de decidir, y ninguna bloquea el arranque:
 | 10 | **I9 — Constelación 3D** | 3.7, si se decide hacerla | Medio | I1 |
 | 11 | **I10a — Re-resumir** | primer nivel de 3.8: relanzar el resumen sobre un `.txt` existente | Bajo | I2, D0 |
 | 12 | **I10b — Subir y transcribir** | segundo nivel de 3.8: cola `jobs`, trabajador systemd en el host, SSE de progreso | **Alto** | I10a |
-| 13 | **I11 — Sugerencias de duplicados** | en el panel, «posible duplicado de…» con *Fusionar* / *No es la misma*; lista de pendientes en el tablero | Bajo | I6a, **Fase 8 del motor** |
+| 13 | **I11 — Sugerencias de duplicados** | en el panel, «posible duplicado de…» con *Fusionar* / *No es la misma*; lista de pendientes en el tablero | Bajo | I6a, ~~Fase 8 del motor~~ **hecha (2026-11-10)** |
 
 **Dependencia crítica de I6a:** igual que I5 con la Fase 4, no se escribe
 un solo endpoint de escritura antes de que la Fase 7 del motor esté hecha y

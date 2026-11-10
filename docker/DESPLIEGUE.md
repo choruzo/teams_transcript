@@ -55,7 +55,7 @@ curl -s localhost:8080/api/salud | python3 -m json.tool
 ```
 
 Debe responder `"base_accesible": true` y el número de reuniones que hay en la
-base. Si dice que **la base está en el esquema 1**, migrarla:
+base. Si dice que **la base está en un esquema anterior**, migrarla:
 
 ```bash
 python3 memoria.py --migrar

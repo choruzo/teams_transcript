@@ -33,6 +33,7 @@ from pathlib import Path
 import glosario as glosario_mod
 import llm
 import memoria
+import rag
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -47,6 +48,7 @@ MAXIMO_SIN_MENCION = 15
 MAXIMO_BLOQUEOS = 10
 MAXIMO_RIESGOS = 15
 MAXIMO_PERSONAS = 25
+MAXIMO_SUGERENCIAS = 15
 
 # Reuniones sin nombrar una accion a partir de las cuales merece la pena
 # senalarla. Con 1 se llenaria de acciones que simplemente no tocaban hoy.
@@ -116,12 +118,66 @@ def periodo_mensual(referencia: date | None = None) -> tuple[str, str]:
 # --------------------------------------------------------------------------
 
 
+def cargar_sugerencias(
+    conn_hist: sqlite3.Connection,
+    *,
+    ruta_indice: Path | str | None = None,
+    umbral: float | None = None,
+) -> tuple[list[dict], str | None]:
+    """Posibles duplicados ya calculados, sin llamar al modelo. `(lista, aviso)`.
+
+    **Nunca lanza**: igual que la narrativa, las sugerencias son un extra. Si
+    no hay indice, no esta `sqlite-vec` o nadie ha ejecutado
+    `indexar_teams.py --acciones`, el informe sale igual y lo dice.
+    """
+    try:
+        conn_idx = rag.conectar(ruta_indice, solo_lectura=True)
+    except FileNotFoundError:
+        return [], (
+            "No hay indice semantico. Ejecuta `python indexar_teams.py --acciones`."
+        )
+    except Exception as exc:  # noqa: BLE001 - el informe no se cae por esto
+        return [], f"No se pudo abrir el indice: {exc}"
+    try:
+        acciones = memoria.acciones_para_sugerir(conn_hist)
+        if not acciones:
+            return [], "No hay acciones abiertas que comparar."
+        try:
+            hay_vectores = conn_idx.execute(
+                "SELECT 1 FROM acciones_indexadas LIMIT 1"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return [], (
+                "El indice no tiene vectores de acciones. Ejecuta "
+                "`python indexar_teams.py --acciones`."
+            )
+        if not hay_vectores:
+            return [], (
+                "No hay vectores de acciones. Ejecuta "
+                "`python indexar_teams.py --acciones`."
+            )
+        parejas = rag.parejas_similares(
+            conn_idx,
+            acciones,
+            rechazadas=memoria.sugerencias_rechazadas(conn_hist),
+            umbral=umbral if umbral is not None else rag.UMBRAL_SUGERENCIA,
+        )
+        return parejas[:MAXIMO_SUGERENCIAS], None
+    except Exception as exc:  # noqa: BLE001
+        return [], f"No se pudieron calcular las sugerencias: {exc}"
+    finally:
+        conn_idx.close()
+
+
 def recopilar(
     conn: sqlite3.Connection,
     *,
     desde: str | None = None,
     hasta: str | None = None,
     persona: str | None = None,
+    sugerencias: list[dict] | None = None,
+    aviso_sugerencias: str | None = None,
+    umbral_sugerencia: float | None = None,
 ) -> dict:
     """Todas las cifras del informe. Deterministas y comprobables.
 
@@ -186,7 +242,7 @@ def recopilar(
             p for p in sin_actualizar if p["persona"].lower() == clave
         ]
 
-    return {
+    datos = {
         "desde": desde,
         "hasta": hasta,
         "persona": persona,
@@ -217,6 +273,17 @@ def recopilar(
         "personas": personas,
         "personas_sin_actualizar": sin_actualizar,
     }
+    # Solo aparece si se pidio (`--sugerencias`): un informe sin indice no debe
+    # fingir que ha mirado duplicados.
+    if sugerencias is not None or aviso_sugerencias is not None:
+        datos["sugerencias"] = sugerencias or []
+        datos["umbral_sugerencia"] = (
+            umbral_sugerencia
+            if umbral_sugerencia is not None
+            else rag.UMBRAL_SUGERENCIA
+        )
+        datos["aviso_sugerencias"] = aviso_sugerencias
+    return datos
 
 
 # --------------------------------------------------------------------------
@@ -247,6 +314,11 @@ def _para_el_modelo(datos: dict) -> dict:
         {k: v for k, v in r.items() if k != "uid"}
         for r in copia["riesgos"]["mencionados"]
     ]
+    if "sugerencias" in copia:
+        copia["sugerencias"] = [
+            {k: v for k, v in par.items() if k not in ("a_uid", "b_uid")}
+            for par in copia["sugerencias"]
+        ]
     return copia
 
 
@@ -418,6 +490,25 @@ def renderizar_markdown(
     _seccion(lineas, "Acciones abiertas, de la mas antigua a la mas reciente",
              cuerpo, "(ninguna)")
 
+    # -- Posibles duplicados -----------------------------------------------
+    if "sugerencias" in datos:
+        cuerpo = [
+            f"- **{par['similitud']:.2f}** — {par['a_descripcion']} "
+            f"({par['a_persona'] or 'sin responsable'}) / "
+            f"{par['b_descripcion']} ({par['b_persona'] or 'sin responsable'})"
+            for par in datos["sugerencias"]
+        ]
+        if cuerpo:
+            cuerpo.append("")
+            cuerpo.append(
+                "*Son parejas **probables**, no confirmadas: el motor no fusiona "
+                f"nada solo. Umbral de similitud {datos['umbral_sugerencia']:.2f}; "
+                "la fusion, si procede, se hace a mano.*"
+            )
+        elif datos.get("aviso_sugerencias"):
+            cuerpo.append(f"*(no disponibles: {datos['aviso_sugerencias']})*")
+        _seccion(lineas, "Posibles duplicados", cuerpo, "(ninguno)")
+
     # -- Sin mencion -------------------------------------------------------
     cuerpo = [
         f"- **{a.get('persona') or 'sin responsable'}** — {a['descripcion']} "
@@ -542,10 +633,21 @@ def generar(
     base_url: str | None = None,
     api_key: str | None = None,
     modelo: str | None = None,
+    sugerencias: list[dict] | None = None,
+    aviso_sugerencias: str | None = None,
+    umbral_sugerencia: float | None = None,
     cliente=llm,
 ) -> tuple[str, dict, str | None]:
     """El informe de punta a punta: `(markdown, datos, aviso)`."""
-    datos = recopilar(conn, desde=desde, hasta=hasta, persona=persona)
+    datos = recopilar(
+        conn,
+        desde=desde,
+        hasta=hasta,
+        persona=persona,
+        sugerencias=sugerencias,
+        aviso_sugerencias=aviso_sugerencias,
+        umbral_sugerencia=umbral_sugerencia,
+    )
     narrativa, aviso = (None, None)
     if con_llm:
         narrativa, aviso = narrar(
@@ -596,6 +698,18 @@ def main() -> None:
     parser.add_argument("--persona", default=None, help="Filtra por responsable")
     parser.add_argument("--db", default=None, help="Ruta de meetings.db (o TEAMS_DB)")
     parser.add_argument(
+        "--indice", default=None, help="Ruta de indice.db (o TEAMS_INDICE)"
+    )
+    parser.add_argument(
+        "--sugerencias",
+        action="store_true",
+        help="Anade los posibles duplicados ya calculados por el indice",
+    )
+    parser.add_argument(
+        "--umbral-sugerencia", type=float, default=None,
+        help=f"Similitud minima para los duplicados (por defecto: {rag.UMBRAL_SUGERENCIA})",
+    )
+    parser.add_argument(
         "-o", "--salida", default=None,
         help="Fichero .md de salida (por defecto, la consola)",
     )
@@ -637,8 +751,24 @@ def main() -> None:
 
     conn = memoria.conectar(ruta_db, solo_lectura=True)
     try:
+        sugerencias, aviso_sugerencias = (None, None)
+        if args.sugerencias:
+            sugerencias, aviso_sugerencias = cargar_sugerencias(
+                conn,
+                ruta_indice=args.indice,
+                umbral=args.umbral_sugerencia,
+            )
+
         if args.json:
-            datos = recopilar(conn, desde=desde, hasta=hasta, persona=args.persona)
+            datos = recopilar(
+                conn,
+                desde=desde,
+                hasta=hasta,
+                persona=args.persona,
+                sugerencias=sugerencias,
+                aviso_sugerencias=aviso_sugerencias,
+                umbral_sugerencia=args.umbral_sugerencia,
+            )
             print(json.dumps(datos, ensure_ascii=False, indent=2))
             return
 
@@ -652,6 +782,9 @@ def main() -> None:
             base_url=args.base_url,
             api_key=args.api_key,
             modelo=args.model,
+            sugerencias=sugerencias,
+            aviso_sugerencias=aviso_sugerencias,
+            umbral_sugerencia=args.umbral_sugerencia,
         )
     finally:
         conn.close()

@@ -74,6 +74,11 @@ class TestComandos(unittest.TestCase):
         cmd = pt.comando_indexar(_args(), "20260907_090437_mixed")
         self.assertEqual(cmd[cmd.index("--reunion") + 1], "20260907_090437_mixed")
 
+    def test_indexar_recalcula_las_sugerencias_de_duplicados(self):
+        # Una accion nueva se compara con todas las abiertas, no solo con las
+        # de su reunion: por eso el paso de indice siempre lleva --acciones.
+        self.assertIn("--acciones", pt.comando_indexar(_args(), None))
+
     def test_indexar_sin_uid_no_pasa_reunion(self):
         # Sin uid se indexa lo que falte: correcto, solo mas lento.
         self.assertNotIn("--reunion", pt.comando_indexar(_args(), None))

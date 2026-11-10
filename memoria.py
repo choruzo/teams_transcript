@@ -31,7 +31,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-ESQUEMA_VERSION = 4
+ESQUEMA_VERSION = 5
 
 RUTA_POR_DEFECTO = Path(__file__).resolve().parent / "datos" / "meetings.db"
 VARIABLE_ENTORNO = "TEAMS_DB"
@@ -179,6 +179,19 @@ CREATE TABLE IF NOT EXISTS correcciones (
 -- no se ve, no cuenta y no se le ofrece al LLM.
 CREATE VIEW IF NOT EXISTS acciones_vigentes AS
   SELECT * FROM actions WHERE descartada_en IS NULL AND absorbida_por IS NULL;
+
+-- Esquema 5 (Fase 8). Un rechazo de sugerencia de duplicado es una decision
+-- humana, no un derivado del indice: si viviera en `indice.db`, reconstruirlo
+-- volveria a proponer parejas ya descartadas. El par se guarda **ordenado**
+-- (a < b) para que "no es la misma" valga en los dos sentidos, y sin clave
+-- ajena: si un reproceso borra una accion, el rechazo huerfano no impide nada.
+CREATE TABLE IF NOT EXISTS sugerencias_rechazadas (
+  action_a_uid  TEXT NOT NULL,
+  action_b_uid  TEXT NOT NULL,
+  creado_en     TEXT NOT NULL,
+  PRIMARY KEY (action_a_uid, action_b_uid),
+  CHECK (action_a_uid < action_b_uid)
+);
 
 CREATE TABLE IF NOT EXISTS risks (
   id          INTEGER PRIMARY KEY,
@@ -2920,6 +2933,132 @@ def aplicar_arrastres(
 
 
 # --------------------------------------------------------------------------
+# Sugerencias de duplicados (Fase 8, esquema 5)
+# --------------------------------------------------------------------------
+# El motor no fusiona nada solo: propone parejas y la decision es humana y
+# pasa por `fusionar_acciones`. Los vectores de las acciones viven en
+# `indice.db` (derivados y reconstruibles); lo unico que se guarda aqui es el
+# **rechazo**, porque reconstruir el indice no puede resucitar una pareja que
+# alguien ya descarto.
+
+
+def acciones_para_sugerir(conn: sqlite3.Connection) -> list[dict]:
+    """Acciones vigentes y abiertas, con lo que necesita el motor de parejas.
+
+    "Abierta" es lo que no esta en `ESTADOS_CERRADOS`: una accion completada o
+    abandonada ya no se fusiona con nada. Se lee de `acciones_vigentes`, asi
+    que descartadas y absorbidas quedan fuera.
+    """
+    abiertos = [e for e in ESTADOS_ACCION if e not in ESTADOS_CERRADOS]
+    filas = conn.execute(
+        f"""
+        SELECT a.uid, a.descripcion, a.estado,
+               a.meeting_id_origen AS meeting_id,
+               mo.uid AS meeting_uid, mo.fecha,
+               COALESCE(p.nombre, '') AS persona
+          FROM acciones_vigentes a
+          JOIN meetings mo ON mo.id = a.meeting_id_origen
+          LEFT JOIN personas p ON p.id = a.persona_id
+         WHERE a.uid IS NOT NULL
+           AND trim(a.descripcion) <> ''
+           AND a.estado IN ({_placeholders(abiertos)})
+         ORDER BY a.id
+        """,
+        abiertos,
+    ).fetchall()
+    return [dict(fila) for fila in filas]
+
+
+def acciones_para_indice(conn: sqlite3.Connection) -> list[dict]:
+    """Todas las acciones con uid, tambien cerradas, descartadas y absorbidas.
+
+    Las absorbidas se indexan a proposito: son la verdad de referencia con la
+    que se calibra el umbral (`indexar_teams.py --acciones --dry-run`). Las
+    sugerencias, en cambio, solo miran `acciones_para_sugerir`.
+    """
+    filas = conn.execute(
+        """
+        SELECT a.uid, a.descripcion, a.estado,
+               a.meeting_id_origen AS meeting_id,
+               mo.uid AS meeting_uid, mo.fecha,
+               COALESCE(p.nombre, '') AS persona,
+               a.absorbida_por IS NOT NULL AS absorbida
+          FROM actions a
+          JOIN meetings mo ON mo.id = a.meeting_id_origen
+          LEFT JOIN personas p ON p.id = a.persona_id
+         WHERE a.uid IS NOT NULL
+           AND trim(a.descripcion) <> ''
+         ORDER BY a.id
+        """
+    ).fetchall()
+    return [dict(fila) for fila in filas]
+
+
+def fusiones_de_referencia(conn: sqlite3.Connection) -> list[dict]:
+    """Las parejas que un humano dio por duplicadas en la Fase 7.
+
+    Es el unico conjunto de verdad de referencia que hay para medir el umbral
+    de similitud. No lo usa el motor: solo la calibracion.
+    """
+    filas = conn.execute(
+        """
+        SELECT d.uid       AS duplicada_uid,
+               d.descripcion AS duplicada,
+               p.uid       AS principal_uid,
+               p.descripcion AS principal
+          FROM actions d
+          JOIN actions p ON p.id = d.absorbida_por
+         WHERE d.uid IS NOT NULL AND p.uid IS NOT NULL
+         ORDER BY d.id
+        """
+    ).fetchall()
+    return [dict(fila) for fila in filas]
+
+
+def _par_de_uids(uid_a: str, uid_b: str) -> tuple[str, str]:
+    a, b = str(uid_a).strip(), str(uid_b).strip()
+    if not a or not b:
+        raise CorreccionInvalida("Los dos uid son obligatorios.")
+    if a == b:
+        raise CorreccionInvalida("Una accion no se puede rechazar contra si misma.")
+    return (a, b) if a < b else (b, a)
+
+
+def rechazar_sugerencia(conn: sqlite3.Connection, uid_a: str, uid_b: str) -> dict:
+    """Anota que dos acciones **no** son la misma. Idempotente y simetrica.
+
+    Exige que las dos existan, para que una errata no quede guardada en
+    silencio, pero no que esten abiertas: se puede rechazar una pareja que el
+    indice propuso antes de que una de las dos se cerrara.
+    """
+    a, b = _par_de_uids(uid_a, uid_b)
+    with conn:
+        _accion_por_uid(conn, a)
+        _accion_por_uid(conn, b)
+        conn.execute(
+            "INSERT OR IGNORE INTO sugerencias_rechazadas "
+            "(action_a_uid, action_b_uid, creado_en) VALUES (?, ?, datetime('now'))",
+            (a, b),
+        )
+        fila = conn.execute(
+            "SELECT creado_en FROM sugerencias_rechazadas "
+            "WHERE action_a_uid = ? AND action_b_uid = ?",
+            (a, b),
+        ).fetchone()
+    return {"a_uid": a, "b_uid": b, "creado_en": fila["creado_en"]}
+
+
+def sugerencias_rechazadas(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    """Pares rechazados, ya normalizados para comparar en los dos sentidos."""
+    return {
+        (fila["action_a_uid"], fila["action_b_uid"])
+        for fila in conn.execute(
+            "SELECT action_a_uid, action_b_uid FROM sugerencias_rechazadas"
+        )
+    }
+
+
+# --------------------------------------------------------------------------
 # Correccion humana de acciones (Fase 7, seccion 7.2)
 # --------------------------------------------------------------------------
 # Todas las operaciones corren en una transaccion (`with conn`: confirman al
@@ -3674,7 +3813,7 @@ def detalle_accion(conn: sqlite3.Connection, uid: str) -> dict:
 
 
 def _main() -> None:
-    """`python memoria.py --migrar` / `--info`.
+    """`python memoria.py --migrar` / `--info` / `--rechazar-sugerencia A B`.
 
     Existe por el servidor cerrado: la API se abre en solo lectura y no puede
     migrar la base, asi que hace falta una forma explicita de hacerlo sin
@@ -3692,11 +3831,23 @@ def _main() -> None:
     parser.add_argument(
         "--info", action="store_true", help="Muestra las cifras de la base"
     )
+    parser.add_argument(
+        "--rechazar-sugerencia",
+        nargs=2,
+        metavar=("UID_A", "UID_B"),
+        default=None,
+        help="Anota que dos acciones no son la misma (la sugerencia no vuelve)",
+    )
+    parser.add_argument(
+        "--rechazadas",
+        action="store_true",
+        help="Lista las parejas de sugerencias rechazadas",
+    )
     args = parser.parse_args()
 
     path = ruta_bd(args.db)
-    if not (args.migrar or args.info):
-        parser.error("indica --migrar o --info")
+    if not (args.migrar or args.info or args.rechazar_sugerencia or args.rechazadas):
+        parser.error("indica --migrar, --info, --rechazar-sugerencia o --rechazadas")
 
     if args.migrar:
         if not path.exists():
@@ -3729,6 +3880,33 @@ def _main() -> None:
                 print(f"{clave:>18}: {valor}")
         finally:
             conn.close()
+
+    if args.rechazar_sugerencia:
+        # Abre en escritura: es mantenimiento, como `--migrar`.
+        conn = conectar(path)
+        try:
+            par = rechazar_sugerencia(conn, *args.rechazar_sugerencia)
+        finally:
+            conn.close()
+        print(f"Rechazada la pareja {par['a_uid']} <-> {par['b_uid']}.")
+
+    if args.rechazadas:
+        conn = conectar(path, solo_lectura=True)
+        try:
+            pares = sorted(sugerencias_rechazadas(conn))
+        except sqlite3.OperationalError as exc:
+            print(
+                f"No se pudo leer la tabla de rechazos ({exc}). Si la base viene "
+                "de un esquema anterior, ejecuta `python memoria.py --migrar`.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        finally:
+            conn.close()
+        if not pares:
+            print("No hay sugerencias rechazadas.")
+        for a, b in pares:
+            print(f"{a} <-> {b}")
 
 
 if __name__ == "__main__":

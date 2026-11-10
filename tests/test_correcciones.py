@@ -669,6 +669,9 @@ class TestLecturasIgnoranDescartadasYAbsorbidas(Base):
         "detalle_accion",
         # Con `incluir_descartadas` pinta las descartadas atenuadas (I6a).
         "carriles_acciones",
+        # Fase 8: la calibracion necesita tambien cerradas y absorbidas.
+        "acciones_para_indice",
+        "fusiones_de_referencia",
     }
 
     def test_ninguna_lectura_nueva_de_la_tabla_actions(self):

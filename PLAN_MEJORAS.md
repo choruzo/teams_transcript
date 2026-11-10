@@ -929,7 +929,7 @@ actualizar la API (en solo lectura responde 503 con una base en esquema 2).
 
 ---
 
-## Fase 8 — Sugerencias de duplicados — propuesta (2026-09-16)
+## Fase 8 — Sugerencias de duplicados — **implementada (motor, 2026-11-10)**
 
 **Resuelve:** que haya que descubrir a ojo las duplicadas entre cientos de
 acciones. **Esfuerzo:** medio. **Riesgo:** bajo: nunca escribe nada sin un
@@ -956,6 +956,55 @@ humano. **Depende de:** Fase 7 y del índice semántico de la Fase 4.
 - `report_teams.py` puede listar las sugerencias pendientes como una sección
   más, con su advertencia de que son probables, no confirmadas.
 
+### Resultado (2026-11-10)
+
+Implementado el motor: esquema 5 (`sugerencias_rechazadas`), los vectores de
+acciones en `indice.db`, `indexar_teams.py --acciones` / `--dry-run`, el paso
+de indexado de `procesar_teams.py`, `--sugerencias` en `report_teams.py` y
+`memoria.py --rechazar-sugerencia` / `--rechazadas` para que el rechazo sea
+posible antes de I11. Cubierto por `tests/test_sugerencias.py` (28 pruebas;
+415 en total).
+
+Lo que cambió al implementarlo:
+
+1. **Tabla normal, no `vec0`**: los vectores se guardan como BLOB en
+   `acciones_indexadas` junto a su texto y su huella. Aquí no se busca el
+   vecino más cercano de una consulta, se comparan todas las parejas abiertas
+   entre sí, y tener el vector con su texto evita dos escrituras que se
+   puedan desincronizar. El CLI sigue exigiendo `sqlite-vec` para el índice de
+   transcripciones, que es el criterio del plan.
+2. **Se indexan todas las acciones**, incluidas cerradas, descartadas y
+   absorbidas: sin las absorbidas no hay verdad de referencia con la que medir
+   el umbral. Las sugerencias solo miran las vigentes y abiertas.
+3. **Una sugerencia por acción** (`mejores=True`): proponerle tres candidatas a
+   la misma acción llena la pantalla y no ayuda a decidir. `--dry-run` no
+   aplica ese recorte: enseña todas las parejas para poder medir.
+4. **El texto que se embebe es solo la descripción**: ni fecha ni reunión (el
+   duplicado nace en reuniones distintas) ni responsable (un `Pedro / José
+   Javier` o un `SPEAKER_02` mal resuelto escondería la pareja real). La regla
+   de «misma reunión, distinto responsable» se aplica al filtrar.
+5. **El rechazo es simétrico e idempotente**: se guarda con el par ordenado
+   (`a < b`), sin clave ajena, para que un rechazo huérfano no impida borrar
+   una acción.
+6. **`--dry-run` no escribe y enseña dos listas**: las parejas por encima de
+   `--minimo` (con la marca de si se propondrían) y las fusiones manuales de la
+   Fase 7, aunque queden por debajo del umbral; sin las segundas no se ven los
+   falsos negativos.
+7. **El umbral 0,74 está medido** (2026-11-10, servidor, 14 reuniones / 139
+   acciones / 115 abiertas, `bge-m3` q8_0): 6 sugerencias, las 5 más claras más
+   el LDAP de TTC. A 0,75 se pierde el LDAP; a 0,73 empiezan los falsos
+   positivos (`crear` vs `probar` la tabla de Star Contact, GCS4-1); a 0,70,
+   21 parejas y casi todo ruido. La única fusión manual de la Fase 7 queda en
+   0,6614, una paráfrasis que el embedding no distingue: bajarla a 0,66 daría
+   19 sugerencias para 115 acciones, así que se asume como falso negativo
+   conocido. Se recalibra sin tocar código con `--umbral`.
+8. **El informe solo lo enseña si se pide** (`--sugerencias`): un informe sin
+   índice no debe fingir que ha mirado duplicados.
+
+Para desplegar: `python memoria.py --migrar` en el servidor (esquema 4 → 5)
+antes de actualizar la API; en solo lectura responde 503 con la base atrasada.
+Después, `python indexar_teams.py --acciones` para crear los primeros vectores.
+
 ---
 
 ## 4. Orden de implementación recomendado
@@ -969,7 +1018,7 @@ humano. **Depende de:** Fase 7 y del índice semántico de la Fase 4.
 | ~~5~~ | ~~Fase 5 — `report_teams.py`~~ **hecha** | Bajo | Nulo | Informes |
 | ~~6~~ | ~~Fase 3 — Perfiles de voz~~ **hecha** | Medio-alto | **Alto** | Calidad a largo plazo |
 | ~~7~~ | ~~Fase 7 — Corrección humana de acciones (esquema 3, D10)~~ **hecha (motor)** | Alto | **Alto** | I6a de la interfaz; Fase 8 |
-| 8 | Fase 8 — Sugerencias de duplicados | Medio | Bajo | I11 de la interfaz |
+| ~~8~~ | ~~Fase 8 — Sugerencias de duplicados~~ **hecha (motor, 2026-11-10)** | Medio | Bajo | I11 de la interfaz |
 | 9 | Fase 6 — Map-reduce | Medio | Medio | Reuniones largas |
 
 La Fase 3 va deliberadamente tarde pese a ser muy valiosa: es la única que

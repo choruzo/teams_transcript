@@ -176,6 +176,10 @@ def comando_resumir(args, transcripcion: Path) -> list[str]:
 
 def comando_indexar(args, uid: str | None) -> list[str]:
     cmd = [args.python, str(args.raiz / "indexar_teams.py")]
+    # Las sugerencias de duplicados (Fase 8) se recalculan en este mismo paso:
+    # una accion nueva se compara con todas las abiertas, no solo con las de su
+    # reunion, asi que no vale con acotar a `--reunion`.
+    cmd.append("--acciones")
     if uid:
         cmd += ["--reunion", uid]
     if args.db:
