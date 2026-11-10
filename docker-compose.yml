@@ -77,6 +77,10 @@ services:
       # .md devuelve 503. Ninguno de los dos anade dependencias: son stdlib.
       - ./summarize_teams.py:/app/summarize_teams.py:ro
       - ./glosario.py:/app/glosario.py:ro
+      # Informes (I8): `/api/informes` es una capa fina sobre `report_teams.py`,
+      # que a su vez importa `rag.py` y `llm.py` (montados mas abajo). Sin este
+      # montaje la web sigue en pie y el informe da un 503 explicativo.
+      - ./report_teams.py:/app/report_teams.py:ro
       # El chat (I5) importa ask_teams.py, que a su vez importa rag.py y
       # llm.py. Sin montarlos, /api/chat devuelve un 503 explicativo y la
       # pagina del chat queda inutil; las otras cuatro siguen funcionando.

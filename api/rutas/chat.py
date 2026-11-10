@@ -20,7 +20,6 @@ Dos detalles que no son negociables:
     forma de saber si la respuesta termino o se rompio.
 """
 
-import json
 import os
 import sqlite3
 from collections.abc import Iterator
@@ -29,8 +28,9 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 import memoria
-from api.deps import ruta_bd
+from api.deps import glosario_del_proyecto, ruta_bd
 from api.modelos import EstadoDelChat, Pregunta
+from api.sse import evento
 
 router = APIRouter(tags=["chat"])
 
@@ -74,21 +74,6 @@ def _abrir_indice():
         return None
 
 
-def _glosario() -> str | None:
-    try:
-        import glosario as glosario_mod
-
-        contenido = glosario_mod.cargar()
-        return glosario_mod.texto_completo(contenido) if contenido else None
-    except Exception:  # noqa: BLE001 - el glosario mejora la respuesta, no la habilita
-        return None
-
-
-def _sse(evento: str, dato) -> str:
-    """Un evento SSE. El JSON va en una sola linea: `data:` no admite saltos."""
-    return f"event: {evento}\ndata: {json.dumps(dato, ensure_ascii=False)}\n\n"
-
-
 @router.post("/chat", summary="Preguntar sobre el historico (SSE)")
 def chat(pregunta: Pregunta) -> StreamingResponse:
     """Responde en streaming, con las fuentes por delante del texto.
@@ -120,7 +105,7 @@ def _generar(motor, pregunta: Pregunta) -> Iterator[str]:
     try:
         conn = memoria.conectar(path, solo_lectura=True, entre_hilos=True)
     except FileNotFoundError:
-        yield _sse("error", f"No se encuentra la base de datos en {path}.")
+        yield evento("error", f"No se encuentra la base de datos en {path}.")
         return
 
     conn_idx = _abrir_indice()
@@ -136,12 +121,12 @@ def _generar(motor, pregunta: Pregunta) -> Iterator[str]:
                 "persona": pregunta.persona,
                 "tipo": pregunta.tipo,
             },
-            glosario=_glosario(),
+            glosario=glosario_del_proyecto(),
         )
         for tipo, dato in eventos:
-            yield _sse(tipo, dato)
+            yield evento(tipo, dato)
     except Exception as exc:  # noqa: BLE001 - cualquier fallo, como evento
-        yield _sse("error", f"Fallo inesperado al responder: {exc}")
+        yield evento("error", f"Fallo inesperado al responder: {exc}")
     finally:
         conn.close()
         if conn_idx is not None:

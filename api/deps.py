@@ -78,6 +78,23 @@ def cookie_segura() -> bool:
     return _verdadero(os.environ.get("TEAMS_COOKIE_SEGURA"), False)
 
 
+def glosario_del_proyecto() -> str | None:
+    """El glosario del proyecto, o `None` si no hay o no se puede leer.
+
+    Lo usan el chat (I5) y la narrativa del informe (I8) para que el modelo
+    reconozca la jerga interna. Un fallo aqui no puede tumbar nada: el glosario
+    mejora la respuesta, no la habilita, asi que se degrada en silencio y el
+    import es perezoso porque `glosario.py` puede no estar montado.
+    """
+    try:
+        import glosario as glosario_mod
+
+        contenido = glosario_mod.cargar()
+        return glosario_mod.texto_completo(contenido) if contenido else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def conexion_usuarios() -> Iterator[sqlite3.Connection]:
     """Una conexion a `datos/usuarios.db` por peticion.
 

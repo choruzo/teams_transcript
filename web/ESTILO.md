@@ -102,7 +102,7 @@ Reglas propias de esta capa:
 ## Vista de reunión (I2)
 
 La segunda página del front (`reunion.html`). No hay enrutado del lado del
-cliente: son ficheros estáticos (cinco desde I5) y el navegador ya sabe ir de
+cliente: son ficheros estáticos (siete desde I8) y el navegador ya sabe ir de
 uno a otro; un router propio solo tendría sentido si hubiera estado que
 conservar entre vistas. Las direcciones del front viven en `js/enlaces.js`, como las del
 servidor viven en `js/api.js`, y siempre llevan el `uid` —nunca el `id`—
@@ -185,7 +185,7 @@ La cuarta página (`buscar.html`). Lo propio de esta vista:
    «reuniones», y quien no lo sepa concluirá que la herramienta no funciona.
 
 El atajo global (`/`, o `Ctrl`/`Cmd`+`K`) vive en `js/buscador.js` y lo
-importan las cinco páginas. `/` se ignora si el foco está en un campo de
+importan las siete páginas. `/` se ignora si el foco está en un campo de
 texto —ahí es una barra—; el de modificador no, porque se pulsa a propósito.
 En la propia página de búsqueda enfoca el campo y selecciona lo que hubiera,
 en vez de navegar a donde ya se está.
@@ -241,6 +241,34 @@ de reunión.
   de», discontinuo «bloquea a») con el resto atenuado. Sin flechas
   permanentes. Toda la fila es el blanco de clic (`.tl-fila`).
 
+## Informe (I8)
+
+La séptima página (`informes.html`).
+
+1. **El Markdown del motor es la única fuente.** La página no recalcula ni una
+   cifra ni compone las secciones por su cuenta: pinta el texto que devuelve
+   `report_teams.renderizar_markdown` con el intérprete mínimo de
+   `js/vistas/informe.js` (`#`, `##`, listas de un nivel y énfasis) y descarga
+   ese mismo texto. Dos composiciones serían dos informes.
+2. **La lectura es un añadido, no un requisito.** Las cifras llegan en
+   milisegundos; la prosa del modelo se pide con un botón y llega por SSE. Si
+   el modelo falla, el error se enseña **dentro** de la sección `Lectura` y el
+   informe sigue entero y descargable. La sección va antes de la primera de
+   cifras, que es el orden del `.md` en la consola.
+3. **Los filtros navegan** (periodo, fechas, responsable), como en el tablero:
+   «el informe de noviembre de Ana» se pega en un chat. Las fechas escritas a
+   mano mandan sobre los atajos y, cuando las hay, el atajo deja de viajar en
+   la dirección. El enlace «Ver el informe completo de ese periodo» de las
+   métricas del inicio lleva `desde`/`hasta`, para no volver a escribirlos.
+4. **La barra de acciones reutiliza la jerarquía del panel, acotada**: *Escribir
+   la lectura* es la principal (es lo único que tarda) y *Descargar .md* la
+   secundaria. El aviso del estado de la lectura va en la misma barra, en una
+   región `aria-live`: quien no ve el texto escribirse tiene que saber cuándo
+   termina o cuándo falla.
+5. **El informe es prosa, no un panel de datos**: ancho máximo de 52rem, más
+   aire entre secciones y cursivas apagadas para las notas del motor (D3, D4,
+   D7). Las cifras ya están en el inicio y en el tablero; aquí se leen seguidas.
+
 ## Decir lo que el dato soporta
 
 La interfaz no promete más de lo que hay en la base: los riesgos son
@@ -263,7 +291,7 @@ Un solo botón en la cabecera con tres estados de hecho:
   texto («Claro»/«Oscuro») no dice si nombra el estado actual o el destino.
 
 La lectura de `localStorage` está duplicada a propósito en un `<script>` inline
-del `<head>` de **cada página** (las cinco: `index.html`, `reunion.html`, `acciones.html`, `buscar.html` y `chat.html`): `js/tema.js` es un módulo y por tanto diferido, así
+del `<head>` de **cada página** (las siete: `index.html`, `reunion.html`, `acciones.html`, `buscar.html`, `chat.html`, `informes.html` y `subir.html`): `js/tema.js` es un módulo y por tanto diferido, así
 que sin ese fragmento la página parpadearía en oscuro antes de pasar a claro.
 Los accesos a `localStorage` van en `try/catch` porque en modo incógnito o con
 las cookies bloqueadas lanzan; en ese caso se sigue al sistema y no se recuerda.

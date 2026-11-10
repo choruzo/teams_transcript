@@ -39,6 +39,7 @@ from api.modelos import (
     Trabajo,
     TrabajoCreado,
 )
+from api.sse import evento
 
 router = APIRouter(tags=["trabajos"])
 
@@ -373,11 +374,6 @@ def reintentar(
         raise _traducir(exc)
 
 
-def _sse(evento: str, dato) -> str:
-    """Un evento SSE; el JSON va en una linea porque `data:` no admite saltos."""
-    return f"event: {evento}\ndata: {json.dumps(dato, ensure_ascii=False)}\n\n"
-
-
 def _eventos(uid: str) -> Iterator[str]:
     """Estado y cola del log, hasta que el trabajo termina.
 
@@ -388,7 +384,7 @@ def _eventos(uid: str) -> Iterator[str]:
     try:
         conn = trabajos.conectar(entre_hilos=True)
     except (OSError, sqlite3.Error) as exc:
-        yield _sse("error", f"No se puede abrir la cola de trabajos: {exc}")
+        yield evento("error", f"No se puede abrir la cola de trabajos: {exc}")
         return
     try:
         visto = None
@@ -398,18 +394,18 @@ def _eventos(uid: str) -> Iterator[str]:
             try:
                 fila = trabajos.detalle(conn, uid)
             except trabajos.TrabajoNoEncontrado:
-                yield _sse("error", f"No existe el trabajo {uid}.")
+                yield evento("error", f"No existe el trabajo {uid}.")
                 return
             datos = _modelo(fila).model_dump()
             if datos != visto:
                 visto = datos
-                yield _sse("estado", datos)
+                yield evento("estado", datos)
             lineas, tamano = trabajos.leer_log(uid)
             if tamano != tamano_log:
                 tamano_log = tamano
-                yield _sse("log", {"lineas": lineas, "bytes": tamano})
+                yield evento("log", {"lineas": lineas, "bytes": tamano})
             if fila["estado"] in trabajos.ESTADOS_TERMINALES:
-                yield _sse("fin", datos)
+                yield evento("fin", datos)
                 return
             # Un latido aunque no cambie nada: mantiene viva la conexion y,
             # sobre todo, le da a Starlette un punto donde notar que el cliente
@@ -417,7 +413,7 @@ def _eventos(uid: str) -> Iterator[str]:
             # durmiendo para siempre.
             if time.monotonic() - ultimo_latido >= 10:
                 ultimo_latido = time.monotonic()
-                yield _sse("latido", {"estado": fila["estado"]})
+                yield evento("latido", {"estado": fila["estado"]})
             time.sleep(1)
     finally:
         conn.close()

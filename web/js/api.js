@@ -15,7 +15,11 @@ export function irAEntrar() {
   window.location.href = `/login.html?next=${encodeURIComponent(next)}`;
 }
 
-async function pedir(ruta, parametros = {}) {
+/**
+ * La URL de la API con sus parametros. `null`, `undefined` y `""` se omiten:
+ * quien llama no tiene que ir limpiando opcionales.
+ */
+function urlCon(ruta, parametros = {}) {
   const url = new URL(BASE + ruta, window.location.origin);
   for (const [clave, valor] of Object.entries(parametros)) {
     if (valor === null || valor === undefined || valor === "") continue;
@@ -28,6 +32,11 @@ async function pedir(ruta, parametros = {}) {
       url.searchParams.set(clave, valor);
     }
   }
+  return url;
+}
+
+async function pedir(ruta, parametros = {}) {
+  const url = urlCon(ruta, parametros);
 
   let respuesta;
   try {
@@ -153,6 +162,14 @@ export const api = {
   // hace ping a LiteLLM, y el pie de las otras páginas no debe pagarlo.
   estadoDelChat: () => pedir("/chat/estado"),
   chat: preguntar,
+
+  // I8: el informe del periodo. El Markdown lo compone el motor, que es el
+  // mismo que imprime la consola: la pagina no recalcula ninguna cifra. La
+  // lectura del modelo va aparte y en streaming porque tarda decenas de
+  // segundos.
+  informe: (filtros) => pedir("/informes", filtros),
+  narrativaInforme: (filtros, manejadores) =>
+    seguirEventos(urlCon("/informes/narrativa", filtros).toString(), {}, manejadores),
 
   // I10b: subir una grabación. La API solo escribe en la cola; el trabajador
   // del host es quien transcribe. `subirParte` no pasa por `pedir()` porque

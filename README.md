@@ -25,6 +25,11 @@ conversaciones son inventados.
 Más: [inicio completo con métricas](capturas/01_inicio_timeline.png) ·
 [tema claro](capturas/08_portada_tema_claro.png).
 
+Los **informes** de periodo tienen su propia página (`/informes.html`): las
+mismas cifras que imprime `report_teams.py`, con los atajos de esta semana,
+este mes o el histórico, filtro por responsable y descarga en Markdown. La
+lectura en prosa se pide a mano, porque tarda, y se escribe en streaming.
+
 ## Cómo funciona
 
 - Captura tu **micrófono** (tu voz) con el dispositivo de entrada por defecto.
@@ -418,6 +423,10 @@ las acompaña**, con prohibición explícita de inventarse ninguna. Si el modelo
 no está disponible, el informe sale igual con sus tablas y una nota diciendo
 por qué falta el análisis: se pierde la lectura, no el dato. Con `--sin-llm`
 ni se intenta, y con `--json` se vuelca solo la parte determinista.
+
+Lo mismo está en la web, en `/informes.html`: el mismo Markdown, los atajos de
+periodo, el filtro por responsable y la descarga. La única diferencia es que
+la lectura se pide con un botón y llega escribiéndose.
 
 El informe **dice en pantalla lo que no puede saber**, en vez de dar el número
 a secas: que las acciones son el estado de hoy y no el del periodo, que la

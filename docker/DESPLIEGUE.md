@@ -25,7 +25,7 @@ Dos cosas distintas, con ritmos distintos:
 scp dist\teams-transcript-api-0.1.0.tar dist\SHA256SUMS.txt servidor:~/teams_transcript/dist/
 
 # El código: cada vez que se toca el front o la API. Son kilobytes.
-scp -r api web autenticacion.py memoria.py summarize_teams.py glosario.py docker-compose.yml servidor:~/teams_transcript/
+scp -r api web autenticacion.py memoria.py summarize_teams.py glosario.py report_teams.py docker-compose.yml servidor:~/teams_transcript/
 ```
 
 ## 3. En el servidor
@@ -258,6 +258,7 @@ borra ningún audio.
 | `trabajos.py`, `web/subir.html`, `web/js/subir.js` | `scp` + `docker compose restart api`. El trabajador los lee del host; si cambia `trabajos.py`, reinicia también `systemctl --user restart trabajador-teams` |
 | `trabajador_teams.py`, `trabajador-teams.service`, `.env.trabajador.ejemplo` | `scp` al host; si cambia la unidad, `cp` a `~/.config/systemd/user/`, `daemon-reload` y `restart` |
 | `summarize_teams.py`, `glosario.py` | igual: la API los monta porque reutiliza `renderizar_markdown` y los títulos de `TIPOS` |
+| `report_teams.py` | igual: `/api/informes` es una capa fina sobre él. Sin el montaje, la página del informe sigue abriéndose pero el endpoint da un 503 explicativo |
 | `requirements-api.txt` | `exportar.ps1` con una versión nueva, `scp`, `docker load`, actualizar el tag en `docker-compose.yml`, `docker compose up -d` |
 | `docker-compose.yml` | `scp` + `docker compose up -d` |
 | Esquema de la BD (`ESQUEMA_VERSION`) | copia + `docker compose exec -T api python memoria.py --migrar`; después, `docker compose exec -T api python - --acciones < indexar_teams.py` |

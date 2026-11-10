@@ -16,7 +16,7 @@ import { dibujarTimeline, marcarSeleccionada } from "./vistas/timeline.js";
 import { crearPanel } from "./vistas/panel_accion.js";
 import { dibujarListado } from "./vistas/listado.js";
 import { pintarSalud } from "./vistas/salud.js";
-import { urlReunion } from "./enlaces.js";
+import { urlInforme, urlReunion } from "./enlaces.js";
 import { iniciarAtajoDeBusqueda } from "./buscador.js";
 
 const $ = (selector) => document.querySelector(selector);
@@ -125,6 +125,20 @@ function pintarError(donde, mensaje) {
     </div>`;
 }
 
+/**
+ * El puente de la salud del equipo al informe (I8): el periodo que se está
+ * mirando en el timeline es el que se lleva al informe, en vez de obligar a
+ * volver a escribirlo. Es el «3.2 ampliado» del plan, y no una vista nueva
+ * dentro de la principal: el informe tiene su propia página porque se lee de
+ * arriba abajo y se descarga.
+ */
+function enlazarInforme(filtros) {
+  $("#enlace-informe").href = urlInforme({
+    desde: filtros.desde,
+    hasta: filtros.hasta,
+  });
+}
+
 function marcarPeriodoActivo(filtros) {
   // "Todo" solo esta activo si no hay ninguna fecha; un rango escrito a mano
   // que no coincide con ningun preset no marca ninguno, que es lo honesto.
@@ -158,6 +172,7 @@ async function cargar() {
   const filtros = filtrosDeLaUrl();
   volcarFiltrosEnElFormulario(filtros);
   marcarPeriodoActivo(filtros);
+  enlazarInforme(filtros);
   $("#timeline").innerHTML = '<div class="aviso">Cargando…</div>';
   $("#listado").innerHTML = '<div class="aviso">Cargando…</div>';
 

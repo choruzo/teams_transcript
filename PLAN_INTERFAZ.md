@@ -728,7 +728,7 @@ pendientes de decidir, y ninguna bloquea el arranque:
 | ~~7~~ | ~~**I6a — Editar acciones desde el timeline**~~ **hecha** | 3.6 bis: panel lateral, corregir, descartar, fusionar, dependencias, marcas intermedias en los carriles | **Alto** | I1, I3, **Fase 7 del motor** |
 | 7 bis | **I6b — Hablantes, personas y glosario** | el resto de 3.6; incluye los responsables compuestos (`Pedro / José Javier`) | Medio | I6a |
 | 8 | **I7 — Audio sincronizado** | reproductor de 3.3 | Bajo | I2 |
-| 9 | **I8 — Informes** | 3.2 ampliado + descarga de Markdown | Bajo | **Fase 5 del motor** |
+| ~~9~~ | ~~**I8 — Informes**~~ **hecha (2026-11-10)** | 3.2 ampliado + descarga de Markdown | Bajo | Fase 5 del motor |
 | 10 | **I9 — Constelación 3D** | 3.7, si se decide hacerla | Medio | I1 |
 | 11 | **I10a — Re-resumir** | primer nivel de 3.8: relanzar el resumen sobre un `.txt` existente | Bajo | I2, D0 |
 | 12 | ~~**I10b — Subir y transcribir**~~ **implementada y probada en producción, también por el portal (2026-11-10)** | segundo nivel de 3.8: cola `jobs`, trabajador systemd en el host, SSE de progreso | **Alto** | I10a |
@@ -785,6 +785,9 @@ duplicándola.
   no vuelva a proponerse ni tras reconstruir el índice.
 - **I7**: hacer clic en una frase de la transcripción reproduce ese instante
   del audio.
+- **I8**: el informe del mes en curso se descarga como un `.md` **idéntico** al
+  de `report_teams.py --mensual`, y su lectura llega escribiéndose sin bloquear
+  la página; si el modelo no está, el informe sigue entero y lo dice.
 - **I10b**: subir un `.wav` desde el navegador produce, sin tocar la consola,
   una reunión completa en la base con su transcripción, su resumen y sus
   arrastres, y el progreso se ha podido seguir en vivo.
@@ -1534,6 +1537,85 @@ prueba en un navegador real queda pendiente de que alguien abra la página; el
 JS se ha comprobado con Node y la API/SSE con `curl`. La retención de audio
 sigue sin decidir (hoy solo se avisa del espacio; no se borra nada) y el máximo
 de 2 GB se revisará con los tiempos medidos.
+
+---
+
+## 9 duodecies. Resultado de I8 (2026-11-10)
+
+Ficheros nuevos: `api/rutas/informes.py`, `api/sse.py`, `web/informes.html`,
+`web/js/informes.js`, `web/js/vistas/informe.js` y
+`tests/test_api_informes.py`. Tocados: `api/main.py`, `api/modelos.py`,
+`api/deps.py`, `api/rutas/chat.py`, `api/rutas/trabajos.py`, `report_teams.py`
+(`narrar_en_streaming`), `web/js/api.js`, `web/js/enlaces.js`, `web/js/app.js`,
+las seis páginas anteriores, `web/css/estilo.css`, `docker-compose.yml`,
+`proxy/portal`, `web/ESTILO.md`, `README.md` y `docker/DESPLIEGUE.md`.
+Tests: **516** (19 nuevos en `tests/test_api_informes.py`).
+
+Decisiones tomadas al implementarla:
+
+1. **Lo que viaja es Markdown, no cifras.** `GET /api/informes` devuelve el
+   texto de `renderizar_markdown` y la página lo pinta tal cual. Devolver los
+   datos y recomponer las secciones en el front habría creado una segunda
+   presentación del mismo informe, que es exactamente lo que esta herramienta
+   evita en todos los demás sitios. La descarga es un `Blob` de **esa misma
+   cadena**, así que el `.md` no puede diferir de lo que se lee.
+2. **El intérprete de Markdown del cliente es mínimo a propósito**
+   (`#`, `##`, listas de un nivel y énfasis). No es un Markdown general: es el
+   subconjunto que produce `renderizar_markdown`. Escapa el texto **antes** de
+   aplicar el énfasis, igual que el resaltado de I4 y las citas de I5.
+3. **El periodo se resuelve con el código del CLI**, no con una copia:
+   `periodo_semanal` y `periodo_mensual` de `report_teams.py`. `semana` y `mes`
+   son los **en curso**, como `--semanal`/`--mensual`; las fechas explícitas
+   mandan sobre el atajo (`--desde` gana a `--semanal`, igual que allí).
+4. **Un día que no existe es 422, no un informe vacío.** El `pattern` de
+   FastAPI solo mira la forma (`2026-13-01` lo cumple) y la consulta de SQLite
+   es comparación de texto: sin validar, devolvería una lista vacía que se lee
+   como «no hubo reuniones». Se valida con `date.fromisoformat`, y un rango con
+   `desde > hasta` también es 422 con su explicación.
+5. **La lectura va aparte y por SSE.** Es lo único que tarda, y no siempre hace
+   falta: sin ella el informe es igual de válido. `narrar_en_streaming` rinde
+   `texto`/`fin`/`error` como `ask_teams.responder_en_streaming`; un fallo del
+   modelo **no** corta el stream y se pinta dentro de la sección `Lectura`.
+   Para la CLI se conserva `narrar()`, que devuelve el texto entero: no
+   necesita un generador que solo sirve para no bloquear una petición HTTP.
+6. **La lectura se compone en el navegador, y solo la lectura** (`conLectura`).
+   El modelo responde después de que el informe esté en pantalla; el bloque se
+   inserta justo debajo de la cabecera, donde lo pondría `renderizar_markdown`.
+   Está documentado en los dos lados para que un cambio de orden no pase
+   desapercibido.
+7. **El glosario se movió a `deps.glosario_del_proyecto`** y lo comparten chat
+   e informes. Era la tercera copia del mismo `try/except` en la API.
+8. **`api/sse.py` sustituye las tres copias** del serializador de eventos
+   (chat, subidas y narrativa). El formato no se inventa en cada ruta.
+9. **`report_teams.py` se monta en el contenedor**, como `summarize_teams.py` y
+   `ask_teams.py`; el import es perezoso, así que un despliegue sin el montaje
+   da un 503 explicativo y las otras seis páginas siguen en pie.
+10. **El «3.2 ampliado» es un enlace, no otra vista en el inicio**: en
+    «Salud del equipo», «Ver el informe completo de ese periodo» lleva
+    `desde`/`hasta` del timeline al informe. El informe tiene página propia
+    porque se lee de arriba abajo y se descarga.
+11. **Los filtros navegan** (periodo, fechas, responsable) y la lectura no se
+    conserva al cambiarlos: es de otro periodo, y recargarla a medias sería
+    peor que pedirla otra vez. El histórico es un atajo más, no un parámetro
+    oculto.
+
+**Verificado en local (2026-11-10)** con `uvicorn` sobre una copia de la base
+real:
+
+- mes, semana, histórico y un rango traído desde el enlace de las métricas, con
+  el periodo resuelto y las fechas visibles en el título;
+- con un `llama-server` falso que responde por SSE: la lectura se escribe, la
+  sección `LECTURA` aparece **antes** de `Actividad` y el `.md` descargado
+  lleva `## Lectura` con el texto dentro;
+- con el LiteLLM real sin clave, el 401 llegó como evento `error`, se pintó
+  dentro de la sección y el informe siguió entero y descargable (el camino de
+  fallo);
+- sin mensajes en la consola del navegador.
+
+**Lo que queda fuera a propósito:** el informe no se puede «pasar al chat» ni
+al revés; `sugerencias` está apagado por defecto (lee el índice y es un extra,
+igual que `--sugerencias` en el CLI); y no hay captura en `capturas/` porque el
+README las hace con datos ficticios y aquí solo había datos reales.
 
 ---
 

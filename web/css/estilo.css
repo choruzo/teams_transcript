@@ -2064,3 +2064,99 @@ footer .salir[hidden] { display: none; }
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* --- Informe (I8) ------------------------------------------------------- */
+
+.informe-barra {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+}
+
+/* La jerarquia de botones de `.filtros` y del panel, acotada a esta barra: la
+   accion principal es pedir la lectura (lo unico que tarda) y la descarga es
+   secundaria. */
+.informe-barra .primario {
+  background: var(--verde2);
+  color: var(--sobre-acento);
+  font-weight: 600;
+}
+
+.informe-barra .primario:hover:not(:disabled) { background: var(--verde); }
+
+.informe-barra .secundario {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--text);
+}
+
+.informe-barra .secundario:hover:not(:disabled) { border-color: var(--verde2); }
+
+.informe-barra button:disabled { opacity: 0.55; cursor: default; }
+
+/* El aviso de estado comparte barra con los botones: sin margenes propios, o
+   empuja los botones a una segunda linea sin necesidad. */
+.informe-barra .nota { margin: 0; }
+
+/* El informe es prosa: se lee de arriba abajo, asi que respira mas que las
+   vistas de datos y el ancho se limita para que una linea no cruce la pantalla
+   entera. */
+.informe {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radio);
+  padding: 1.1rem 1.25rem 1.4rem;
+  box-shadow: var(--sombra);
+  max-width: 52rem;
+}
+
+.informe h1 {
+  margin: 0 0 0.2rem;
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.informe h2 {
+  margin: 1.5rem 0 0.5rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--line);
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.informe h2:first-of-type { margin-top: 1rem; }
+
+.informe p { margin: 0.5rem 0; line-height: 1.55; }
+
+.informe ul { margin: 0.5rem 0; padding-left: 1.15rem; }
+
+.informe li { margin: 0.25rem 0; line-height: 1.5; }
+
+.informe li ul { margin: 0.25rem 0; }
+
+/* Las notas al pie del motor (D3, D4, D7...) van en cursiva y apagadas: son
+   parte del informe, pero no son cifras. */
+.informe em { color: var(--dim); }
+
+.informe code {
+  font-family: var(--mono);
+  font-size: 0.92em;
+}
+
+/* La lectura del modelo se distingue del resto sin dejar de ser una seccion
+   mas: es la unica parte del informe que no sale de SQL. */
+.informe .lectura p { font-size: 1.02em; }
+
+/* El periodo resuelto ("del 1 nov al 30 nov") junto al titulo, en minusculas
+   como los contadores de las otras vistas. */
+#periodo {
+  font-size: 0.78rem;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}

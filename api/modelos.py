@@ -748,3 +748,34 @@ class EstadoDelTrabajador(BaseModel):
     libre_bytes: int | None = None
     en_cola: int = 0
     en_curso: int = 0
+
+
+# --------------------------------------------------------------------------
+# I8: informes
+# --------------------------------------------------------------------------
+
+
+class Informe(BaseModel):
+    """El informe de un periodo, ya en Markdown.
+
+    Se devuelve el Markdown y no las cifras sueltas porque es **el mismo** que
+    imprime `python report_teams.py` y el que se descarga: la pantalla, la
+    descarga y la consola no pueden contar cosas distintas del mismo periodo.
+    La lectura del modelo va aparte, por SSE, porque tarda decenas de segundos.
+
+    `desde`/`hasta` vuelven resueltos: la pagina manda `periodo=mes` y necesita
+    saber que fechas ha aplicado el servidor para poder ensenarlas.
+    """
+
+    desde: str | None = None
+    hasta: str | None = None
+    persona: str | None = None
+    generado: str
+    sugerencias: bool = Field(
+        False, description="Si el informe incluye los posibles duplicados"
+    )
+    aviso: str | None = Field(
+        None, description="Por que no hay sugerencias, cuando se pidieron"
+    )
+    markdown: str
+

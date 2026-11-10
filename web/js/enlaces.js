@@ -58,3 +58,19 @@ export function urlBuscar(filtros = {}) {
 export function urlChat(pregunta = "") {
   return pregunta ? `/chat.html?q=${encodeURIComponent(pregunta)}` : "/chat.html";
 }
+
+/**
+ * El informe del periodo (I8), con el mismo criterio que el tablero: lo que se
+ * comparte es «el informe de noviembre de Ana», así que periodo y responsable
+ * viajan en la dirección. `sugerencias` se pasa como `"1"`, que es lo que
+ * entiende la página.
+ */
+export function urlInforme(filtros = {}) {
+  const parametros = new URLSearchParams();
+  for (const [clave, valor] of Object.entries(filtros)) {
+    if (valor === null || valor === undefined || valor === "") continue;
+    parametros.set(clave, valor);
+  }
+  const consulta = parametros.toString();
+  return consulta ? `/informes.html?${consulta}` : "/informes.html";
+}

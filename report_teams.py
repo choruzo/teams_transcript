@@ -375,6 +375,52 @@ def narrar(
     return texto, None
 
 
+def narrar_en_streaming(
+    datos: dict,
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    modelo: str | None = None,
+    glosario: str | None = None,
+    cliente=llm,
+):
+    """La misma narrativa, trozo a trozo, para la web (I8).
+
+    Rinde tuplas `(tipo, dato)` con tipo en `texto`, `fin` y `error`, igual que
+    `ask_teams.responder_en_streaming`: la ruta SSE solo las serializa y el CLI
+    sigue usando `narrar()`, que devuelve el texto entero. Un fallo del modelo
+    viaja como evento `error` en vez de cortar el stream, porque una conexion
+    que se corta sin decir nada deja al navegador sin saber si termino.
+
+    `narrar()` no se apoya en esto a proposito: la CLI imprime el texto de una
+    vez y no necesita un generador que solo sirve para no bloquear una
+    peticion HTTP.
+    """
+    mensajes = construir_mensajes(datos, glosario=glosario)
+    try:
+        trozos = cliente.chat_stream(
+            llm.base_url(base_url),
+            llm.api_key(api_key),
+            llm.modelo(modelo),
+            mensajes,
+            temperature=TEMPERATURA_NARRATIVA,
+        )
+        hubo_texto = False
+        for trozo in trozos:
+            if trozo:
+                hubo_texto = True
+                yield ("texto", trozo)
+        if not hubo_texto:
+            # `chat_stream` ya degrada a `chat()` si el backend no hace
+            # streaming; llegar aqui vacio significa que el modelo no dijo nada.
+            yield ("error", "El modelo devolvio una narrativa vacia.")
+            return
+    except Exception as exc:  # noqa: BLE001 - la narrativa no puede tumbar la web
+        yield ("error", f"No se pudo generar la narrativa: {exc}")
+        return
+    yield ("fin", None)
+
+
 # --------------------------------------------------------------------------
 # 3. Markdown
 # --------------------------------------------------------------------------
