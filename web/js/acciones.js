@@ -176,12 +176,12 @@ function dibujarSugerencias() {
       s.fecha ? ` · ${escapar(fechaCorta(s.fecha))}` : ""
     } · ${escapar(nombreEstado(s.estado))}</span>`;
   contenedor.innerHTML = `
-    <ul class="sugerencias">
+    <ul class="duplicados">
       ${paginaSugerencias.sugerencias
         .map(
           (s) => `
-          <li class="sugerencia">
-            <div class="sugerencia-par">
+          <li class="duplicado">
+            <div class="duplicado-par">
               <div>${lado({
                 uid: s.a_uid,
                 descripcion: s.a_descripcion,
@@ -200,7 +200,7 @@ function dibujarSugerencias() {
                 estado: s.b_estado,
               })}</div>
             </div>
-            <div class="sugerencia-acciones">
+            <div class="duplicado-acciones">
               <button type="button" class="mini" data-rechazar
                       data-a="${escapar(s.a_uid)}" data-b="${escapar(s.b_uid)}"
                       title="No volverá a proponerse, ni al reconstruir el índice">No es la misma</button>

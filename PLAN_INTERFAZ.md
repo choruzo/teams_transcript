@@ -1397,6 +1397,12 @@ Decisiones tomadas al implementarla:
 6. **Sin índice se dice, no se cae**: `disponible:false` y un `aviso` que pide
    `indexar_teams.py --acciones`, tanto si falta el fichero como si no tiene
    vectores. El tablero enseña ese aviso en vez de una lista vacía muda.
+7. **Las tarjetas del tablero no reutilizan las clases del chat**:
+   `.sugerencias`/`.sugerencia` son las preguntas sugeridas del chat
+   (`flex-wrap` y `border-radius: 999px`); las de duplicados son
+   `.duplicados`/`.duplicado`, con `grid-template-columns: minmax(0, 1fr)`,
+   `min-width: 0` y `overflow-wrap: anywhere`. Sin eso, el texto largo se salía
+   del contorno y las tarjetas se veían como píldoras.
 
 **Verificado en el navegador** con una copia de la base real del servidor (14
 reuniones, 139 acciones, 115 abiertas) y los vectores de `bge-m3`: el tablero

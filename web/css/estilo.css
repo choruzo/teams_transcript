@@ -1125,47 +1125,59 @@ footer .bien { color: var(--verde); }
 }
 
 /* --- Sugerencias de duplicados (I11) ----------------------------------- */
+/* Ojo con los nombres: `.sugerencias`/`.sugerencia` ya son las preguntas
+   sugeridas del chat (mas abajo). Estas tarjetas necesitan nombre propio o el
+   flex-wrap del chat las convierte en pildoras y el texto se sale. */
 
-.sugerencias {
+.duplicados {
   list-style: none;
   margin: 0;
   padding: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.6rem;
 }
 
-.sugerencia {
+.duplicado {
+  min-width: 0;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radio);
   padding: 0.8rem 0.95rem;
 }
 
-.sugerencia-par { display: grid; gap: 0.3rem; }
+.duplicado-par { display: grid; gap: 0.3rem; min-width: 0; }
 
-.sugerencia-par > div {
+.duplicado-par > div {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 0.5rem;
+  min-width: 0;
 }
 
-.sugerencia-par .abrir-ficha {
+.duplicado-par .abrir-ficha {
+  min-width: 0;
   background: none;
   border: 0;
   padding: 0;
   text-align: left;
   font-weight: 500;
   color: var(--text);
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
-.sugerencia-par .abrir-ficha:hover { color: var(--verde); }
-.sugerencia-par .abrir-ficha:focus-visible { box-shadow: var(--foco); }
+.duplicado-par .abrir-ficha:hover { color: var(--verde); }
+.duplicado-par .abrir-ficha:focus-visible { box-shadow: var(--foco); }
 
-.sugerencia-par .tenue { font-size: 0.78rem; }
+.duplicado-par .tenue {
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
 
 /* La similitud es una medida, no una probabilidad: se ensena el numero. */
-.sugerencia-par .similitud {
+.duplicado-par .similitud {
   justify-self: start;
   font-family: var(--mono);
   font-size: 0.78rem;
@@ -1175,13 +1187,14 @@ footer .bien { color: var(--verde); }
   border-radius: 999px;
 }
 
-.sugerencia-acciones {
+.duplicado-acciones {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   margin-top: 0.45rem;
 }
 
-.sugerencias .mini {
+.duplicados .mini {
   background: transparent;
   border: 1px solid var(--line);
   color: var(--dim);
@@ -1189,7 +1202,7 @@ footer .bien { color: var(--verde); }
   padding: 0.22rem 0.6rem;
 }
 
-.sugerencias .mini:hover:not(:disabled) {
+.duplicados .mini:hover:not(:disabled) {
   border-color: var(--verde2);
   color: var(--text);
 }
@@ -1697,6 +1710,18 @@ a.fuente:hover { border-color: color-mix(in srgb, var(--verde) 45%, var(--line))
   border-left: 2px solid var(--azul2);
   color: var(--dim);
   font-size: 0.8rem;
+}
+
+/* La sugerencia del panel es una ficha corta: el texto largo tiene que
+   envolver dentro del aside, no salirse por la derecha. */
+.pa-sugerencias .pa-lista > li {
+  display: block;
+  min-width: 0;
+}
+
+.pa-sugerencias .enlace {
+  overflow-wrap: anywhere;
+  text-align: left;
 }
 
 .pa-historial > li { display: block; padding: 0.4rem 0; border-bottom: 1px dashed var(--line); }
