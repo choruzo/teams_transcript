@@ -21,3 +21,6 @@ __pycache__/
 .claude/*
 imagen/imagen.png
 .gitignore
+
+# Copias temporales de pruebas locales (nunca versionar bases reales)
+.tmp_i11/
