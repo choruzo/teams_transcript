@@ -158,6 +158,20 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Subidas (I10b): los .wav se mandan por trozos de 16 MB, pero se deja
+        # margen por si un dia se sube el tamano del trozo. Sin esto Nginx
+        # corta con un 413 que el navegador no puede explicar.
+        client_max_body_size 64m;
+        # No acumular el cuerpo en un fichero temporal antes de reenviarlo: la
+        # API va escribiendo el .part segun llega y el progreso se ve antes.
+        proxy_request_buffering off;
+        # El chat y el progreso de las subidas son SSE: sin esto Nginx los
+        # acumula y llegan de golpe al terminar. El timeout largo cubre una
+        # transcripcion que puede estar horas en cola sin cerrar la conexion.
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
     }
     
     #subpaginas. `proxy_pass` SIN barra final: asi Nginx reenvia la ruta
@@ -262,6 +276,18 @@ server {
     # Vista de una reunion. Faltaba: los enlaces del timeline apuntan a
     # /reunion.html?uid=... y sin esto daban 404 al pasar por el portal.
     location = /reunion.html {
+        proxy_pass http://127.0.0.1:8080;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Subida de grabaciones (I10b). Mismo patron que las otras subpaginas:
+    # los enlaces del menu apuntan a /subir.html y sin esto darian 404.
+    location = /subir.html {
         proxy_pass http://127.0.0.1:8080;
 
         proxy_http_version 1.1;

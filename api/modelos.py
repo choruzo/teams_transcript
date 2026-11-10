@@ -634,3 +634,117 @@ class EstadoDelChat(BaseModel):
     indice: dict | None = Field(
         default=None, description="Fragmentos, reuniones y modelo del indice"
     )
+
+
+# --------------------------------------------------------------------------
+# I10b: subir y transcribir desde la web
+# --------------------------------------------------------------------------
+
+
+class Trabajo(BaseModel):
+    """Un trabajo de la cola de subidas.
+
+    No expone rutas del servidor: el front solo necesita el uid para seguir el
+    progreso y, al terminar, el uid de la reunion para enlazarla.
+    """
+
+    uid: str
+    estado: str = Field(
+        description=(
+            "subiendo | encolado | preparando | transcribiendo | resumiendo | "
+            "indexando | hecho | error | cancelado | interrumpido"
+        )
+    )
+    nombre_original: str
+    tamano: int
+    trozo: int
+    trozos: int
+    bytes_confirmados: int
+    fecha_reunion: str
+    hora_reunion: str | None = None
+    tipo: str
+    opciones: dict = Field(default_factory=dict)
+    duracion_seg: float | None = None
+    paso: str | None = None
+    progreso: float | None = None
+    mensaje: str | None = None
+    codigo_salida: int | None = None
+    intentos: int = 0
+    creado_en: str
+    actualizado_en: str
+    inicio_en: str | None = None
+    fin_en: str | None = None
+    reunion_uid: str | None = None
+    sha256: str | None = None
+
+
+class TrabajoCreado(Trabajo):
+    """El trabajo recien reservado y por que trozo empezar (0)."""
+
+    siguiente: int = 0
+
+
+class NuevoTrabajo(BaseModel):
+    """Cuerpo de `POST /api/trabajos`.
+
+    El navegador manda ya el tamano para que la API pueda comprobar el disco
+    antes de aceptar un solo byte. `modelo` y `diarizar` son opciones del
+    pipeline, no del fichero: se guardan en el trabajo para que el trabajador
+    sepa que ejecutar.
+    """
+
+    nombre: str = Field(min_length=1, max_length=255)
+    tamano: int = Field(gt=0)
+    fecha: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    hora: str | None = Field(None, pattern=r"^\d{2}:\d{2}$")
+    tipo: str = "daily"
+    diarizar: bool = True
+    modelo: Literal["large-v3", "medium", "small"] = "large-v3"
+    titulo: str | None = Field(None, max_length=200)
+
+
+class EstadoSubida(BaseModel):
+    """Lo que necesita el navegador para reanudar sin adivinar."""
+
+    uid: str
+    estado: str
+    tamano: int
+    trozo: int
+    trozos: int
+    recibidos: int
+    siguiente: int = Field(description="Indice del proximo trozo que se espera")
+    completo: bool
+
+
+class Finalizacion(BaseModel):
+    forzar: bool = Field(
+        False,
+        description=(
+            "Procesar aunque el sha256 coincida con una subida anterior. Sin "
+            "esto, repetir el mismo fichero da 409 en vez de duplicar la reunion."
+        ),
+    )
+
+
+class PaginaDeTrabajos(BaseModel):
+    trabajos: list[Trabajo]
+
+
+class EstadoDelTrabajador(BaseModel):
+    """Si la web puede aceptar una subida ahora mismo.
+
+    `disponible` es el flag `TEAMS_SUBIDAS`; `trabajador` es el latido real del
+    proceso del host. Son dos cosas distintas y la pagina las dice por
+    separado: se puede aceptar un fichero en cola aunque el trabajador este
+    parado, pero quien lo sube tiene que saber que no va a avanzar.
+    """
+
+    disponible: bool
+    motivo: str | None = None
+    trabajador: bool = False
+    latido_en: str | None = None
+    maximo_bytes: int
+    trozo_bytes: int
+    libre_bytes: int | None = None
+    en_cola: int = 0
+    en_curso: int = 0

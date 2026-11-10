@@ -1019,6 +1019,7 @@ class TestFrontEstatico(BaseAPI):
             ("/acciones.html", "text/html"),
             ("/buscar.html", "text/html"),
             ("/chat.html", "text/html"),
+            ("/subir.html", "text/html"),
             ("/js/app.js", "javascript"),
             ("/js/api.js", "javascript"),
             ("/js/svg.js", "javascript"),
@@ -1038,6 +1039,7 @@ class TestFrontEstatico(BaseAPI):
             ("/js/vistas/busqueda.js", "javascript"),
             ("/js/chat.js", "javascript"),
             ("/js/vistas/chat.js", "javascript"),
+            ("/js/subir.js", "javascript"),
             ("/css/estilo.css", "text/css"),
             ("/css/tokens.css", "text/css"),
         ]:

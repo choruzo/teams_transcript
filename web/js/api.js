@@ -154,6 +154,31 @@ export const api = {
   estadoDelChat: () => pedir("/chat/estado"),
   chat: preguntar,
 
+  // I10b: subir una grabación. La API solo escribe en la cola; el trabajador
+  // del host es quien transcribe. `subirParte` no pasa por `pedir()` porque
+  // manda bytes, no un JSON.
+  estadoTrabajos: () => pedir("/trabajos/estado"),
+  trabajos: (filtros) => pedir("/trabajos", filtros),
+  trabajo: (uid) => pedir(`/trabajos/${encodeURIComponent(uid)}`),
+  crearTrabajo: (cuerpo) => escribir("POST", "/trabajos", null, cuerpo),
+  estadoSubida: (uid) =>
+    pedir(`/trabajos/${encodeURIComponent(uid)}/subida`),
+  subirParte,
+  finalizarTrabajo: (uid, forzar = false) =>
+    escribir("POST", `/trabajos/${encodeURIComponent(uid)}/finalizar`, null, {
+      forzar,
+    }),
+  cancelarTrabajo: (uid) =>
+    escribir("POST", `/trabajos/${encodeURIComponent(uid)}/cancelar`, null),
+  reintentarTrabajo: (uid) =>
+    escribir("POST", `/trabajos/${encodeURIComponent(uid)}/reintentar`, null),
+  eventosTrabajo: (uid, manejadores) =>
+    seguirEventos(
+      BASE + `/trabajos/${encodeURIComponent(uid)}/eventos`,
+      {},
+      manejadores
+    ),
+
   // I6a: la ficha de una acción y sus correcciones. Cada escritura recibe la
   // ficha que se estaba viendo (para `If-Match`) y devuelve la ficha nueva,
   // que puede ser de otra acción: fusionar devuelve la principal y separar,
@@ -176,6 +201,34 @@ export const api = {
 };
 
 /**
+ * Sube un trozo de la grabación (I10b). El cuerpo es el `Blob` tal cual.
+ *
+ * El hash del trozo es opcional a proposito: `crypto.subtle` solo existe en
+ * contexto seguro (HTTPS o localhost), y la subida no puede depender de eso.
+ * Cuando esta, el servidor comprueba que el trozo llego entero; cuando no,
+ * comprueba longitud y el hash del fichero completo al finalizar.
+ */
+async function subirParte(uid, indice, trozo, sha256) {
+  const cabeceras = { "Content-Type": "application/octet-stream" };
+  if (sha256) cabeceras["X-Sha256"] = sha256;
+  let respuesta;
+  try {
+    respuesta = await fetch(
+      `${BASE}/trabajos/${encodeURIComponent(uid)}/partes/${indice}`,
+      { method: "PUT", headers: cabeceras, body: trozo }
+    );
+  } catch (_) {
+    throw new Error("No se puede contactar con el servidor.");
+  }
+  if (respuesta.status === 401) {
+    irAEntrar();
+    throw new Error("La sesión ha caducado.");
+  }
+  if (!respuesta.ok) throw await errorDeRespuesta(respuesta);
+  return respuesta.json();
+}
+
+/**
  * El chat (I5). No pasa por `pedir()` porque la respuesta no es un JSON sino
  * un stream de eventos: hay que ir leyéndola según llega.
  *
@@ -186,16 +239,24 @@ export const api = {
  * `AbortController` para poder parar una respuesta a medias.
  */
 function preguntar(cuerpo, manejadores = {}) {
+  return seguirEventos(
+    BASE + "/chat",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cuerpo),
+    },
+    manejadores
+  );
+}
+
+/** El transporte SSE que comparten el chat y el progreso de las subidas. */
+function seguirEventos(url, opciones, manejadores = {}) {
   const control = new AbortController();
   (async () => {
     let respuesta;
     try {
-      respuesta = await fetch(BASE + "/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(cuerpo),
-        signal: control.signal,
-      });
+      respuesta = await fetch(url, { ...opciones, signal: control.signal });
     } catch (error) {
       if (error.name !== "AbortError") {
         manejadores.error?.("No se puede contactar con el servidor.");

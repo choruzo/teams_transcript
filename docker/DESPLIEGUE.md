@@ -139,11 +139,124 @@ for p in /app5/ /app5/acciones.html /app5/reunion.html /login.html; do
 done
 ```
 
+## 6. Subidas desde la web (I10b)
+
+La web puede aceptar un `.wav` y lanzar el pipeline, pero **el trabajador no va
+en Docker**: necesita la GPU, el venv de Whisper y `systemctl` para parar el
+`llama-server`. Corre como servicio de usuario en el host.
+
+### 6.1 Preparar el volumen y encender el flag
+
+El contenedor corre como **uid 1000 (agent)**, así que el directorio de staging
+tiene que existir antes y pertenecer a ese usuario. Si lo crea Docker al vuelo,
+queda de root y la API no puede escribir:
+
+```bash
+cd ~/teams_transcript
+mkdir -p subidas
+ls -ld subidas          # debe ser agent:agent
+```
+
+En `.env`, encender las subidas:
+
+```bash
+TEAMS_SUBIDAS=1
+```
+
+`docker-compose.yml` ya monta `./subidas:/app/subidas` y
+`./trabajos.py:/app/trabajos.py:ro`, y define `TEAMS_TRABAJOS_DB`. Como cambian
+los volúmenes, hay que recrear el contenedor (no basta `restart`):
+
+```bash
+docker compose up -d
+docker compose exec -T api python -c "import os;print(os.access('/app/subidas', os.W_OK))"
+# debe imprimir True
+```
+
+### 6.2 Nginx: el 413 y el streaming
+
+Sin esto, cualquier trozo de 16 MB muere con **413 Request Entity Too Large**
+(el límite por defecto de nginx es 1 MB) y el SSE del progreso llega de golpe.
+`proxy/portal` ya trae el bloque preparado; hay que copiarlo y recargar:
+
+```bash
+sudo cp proxy/portal /etc/nginx/sites-available/portal
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### 6.3 El trabajador
+
+Variables del host (no las del contenedor): `localhost` y `127.0.0.1` son el
+servidor; `host.docker.internal` solo existe dentro de Docker.
+
+```bash
+cp .env.trabajador.ejemplo .env.trabajador
+nano .env.trabajador       # rellena LITELLM_API_KEY y revisa la URL de embeddings
+```
+
+Instalación como **servicio de usuario** (`agent` ya tiene `Linger=yes`, así que
+arranca al boot sin sesión abierta):
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp trabajador-teams.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now trabajador-teams
+systemctl --user status trabajador-teams
+journalctl --user -u trabajador-teams -f
+```
+
+La unidad pasa `--servicio llama-qwen3-8.service`: el pipeline lo para antes de
+Whisper y lo vuelve a arrancar en su `finally`. `sudo -n` solo tiene permiso
+para `start`/`stop` de esa unidad, que es exactamente lo que se usa.
+
+### 6.4 Comprobar
+
+1. `curl -s localhost:8080/api/trabajos/estado` (con sesión) debe devolver
+   `disponible: true` y `trabajador: true`.
+2. Subir un `.wav` de un minuto desde la página **Subir**.
+3. Seguir el progreso: estado, paso y log. Al terminar debe aparecer el enlace
+   a la reunión.
+4. Comprobar que el chat vuelve a responder después del trabajo
+   (`systemctl status llama-qwen3-8.service`).
+
+### 6.5 Apagar las subidas
+
+```bash
+# .env: TEAMS_SUBIDAS=0
+docker compose up -d
+systemctl --user disable --now trabajador-teams
+```
+
+Los trabajos que ya estén en la cola se quedan ahí; la página lo dice. No se
+borra ningún audio.
+
+### 6.6 Verificación hecha en producción (2026-11-10)
+
+- **Corte y reanudación**: 19,2 MB por trozos, 12 KB de basura añadidos al
+  `.part` a propósito, reanudación y `sha256` final idéntico al original. La
+  cancelación en cola responde y borra el parcial.
+- **Pipeline real**: clip de 60 s → 12 segmentos, 3 acciones, 1 riesgo,
+  `_resumen.md` y 1 fragmento indexado; `llama-qwen3-8` quedó activo. El
+  resumen de un clip tan corto tardó varios minutos con `qwen3.8-27b`; es
+  normal. La reunión de prueba se retiró después con copia en
+  `backups/pre-cleanup-i10b/`.
+- **Bug de rutas corregido**: la cola guarda solo el nombre del `.part`.
+  Reinicia el contenedor y el trabajador tras actualizar `trabajos.py` y
+  `trabajador_teams.py`.
+- **Nginx recargado y verificado (2026-11-10)**: `/app5/`,
+  `/app5/subir.html` y `/subir.html` responden 200 con sesión, y un `PUT` de
+  16 MB por `https://…:8443/api/trabajos/.../partes/0` se acepta con
+  `recibidos: 16777216`. Queda pendiente abrirlo en un navegador real; el JS
+  está comprobado con Node y la API/SSE con `curl`.
+
 ## Actualizar
 
 | Qué cambió | Qué hay que hacer |
 |---|---|
 | `web/`, `api/`, `memoria.py`, `autenticacion.py` | `scp` de los ficheros + `docker compose restart api` |
+| `trabajos.py`, `web/subir.html`, `web/js/subir.js` | `scp` + `docker compose restart api`. El trabajador los lee del host; si cambia `trabajos.py`, reinicia también `systemctl --user restart trabajador-teams` |
+| `trabajador_teams.py`, `trabajador-teams.service`, `.env.trabajador.ejemplo` | `scp` al host; si cambia la unidad, `cp` a `~/.config/systemd/user/`, `daemon-reload` y `restart` |
 | `summarize_teams.py`, `glosario.py` | igual: la API los monta porque reutiliza `renderizar_markdown` y los títulos de `TIPOS` |
 | `requirements-api.txt` | `exportar.ps1` con una versión nueva, `scp`, `docker load`, actualizar el tag en `docker-compose.yml`, `docker compose up -d` |
 | `docker-compose.yml` | `scp` + `docker compose up -d` |

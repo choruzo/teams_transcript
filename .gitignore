@@ -1,5 +1,7 @@
 /.venv
 /grabaciones
+# Staging de las subidas (I10b): son .part de cientos de MB, nunca al repo.
+/subidas/
 __pycache__/
 
 # Datos de reuniones: no se versionan. La plantilla del glosario si.
@@ -17,6 +19,7 @@ __pycache__/
 # Configuracion local del despliegue: rutas de esta maquina y la clave de
 # LiteLLM. La plantilla versionada es .env.ejemplo.
 .env
+.env.trabajador
 
 .claude/*
 imagen/imagen.png

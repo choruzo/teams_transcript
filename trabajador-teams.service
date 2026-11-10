@@ -1,0 +1,30 @@
+[Unit]
+# Unidad de USUARIO (systemd --user). Se instala en:
+#   ~/.config/systemd/user/trabajador-teams.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now trabajador-teams
+#
+# `agent` ya tiene Linger=yes en el servidor, asi que arranca al boot sin
+# sesion abierta. Para instalarla como unidad de sistema, anade User=agent y
+# cambia WantedBy por multi-user.target; no hace falta.
+Description=Memoria del equipo - trabajador de subidas
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/agent/teams_transcript
+# Variables del host (no las del contenedor): el worker habla con llama-server
+# en 127.0.0.1 y con pyannote en modo offline. Plantilla:
+# .env.trabajador.ejemplo. No se versiona.
+EnvironmentFile=/home/agent/teams_transcript/.env.trabajador
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/agent/teams_transcript/venv/bin/python /home/agent/teams_transcript/trabajador_teams.py --servicio llama-qwen3-8.service --espera 120
+Restart=always
+RestartSec=10
+# El pipeline para el LLM con `sudo -n systemctl stop`: NoNewPrivileges=true
+# lo impediria. No es un endurecimiento que se pueda poner aqui.
+KillMode=mixed
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target

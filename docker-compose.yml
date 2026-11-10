@@ -19,6 +19,14 @@ services:
       # la web; antes de la primera escritura de cada dia se copia la base en
       # datos/copias/ (TEAMS_COPIAS_DIAS dias, 7 por defecto).
       TEAMS_API_SOLO_LECTURA: "${TEAMS_API_SOLO_LECTURA:-1}"
+      # Subidas desde la web (I10b). Apagadas por defecto: sin el trabajador
+      # instalado en el host, el fichero se quedaria en la cola para siempre.
+      # El trabajador NO va en este contenedor (necesita GPU, venv y systemctl).
+      TEAMS_SUBIDAS: ${TEAMS_SUBIDAS:-0}
+      TEAMS_TRABAJOS_DB: /app/datos/trabajos.db
+      # Staging escribible por la API. El trabajador mueve el fichero ya
+      # validado a grabaciones/, que sigue montado en solo lectura aqui.
+      TEAMS_SUBIDAS_DIR: /app/subidas
       # Login (autenticacion.py). La base de usuarios vive junto a la de
       # reuniones, dentro del volumen `datos`, para que sobreviva a un
       # `docker compose up -d` y no viaje dentro de la imagen. El usuario
@@ -56,6 +64,9 @@ services:
       - ./api:/app/api:ro
       - ./web:/app/web:ro
       - ./memoria.py:/app/memoria.py:ro
+      # La cola de subidas (I10b). El modulo es stdlib: si falta el montaje,
+      # la API arranca igual y las rutas /api/trabajos dan un 503 explicativo.
+      - ./trabajos.py:/app/trabajos.py:ro
       # El login: usuarios y sesiones en `datos/usuarios.db`. La API lo importa
       # en cada peticion; sin este volumen montado la app no puede autenticar.
       - ./autenticacion.py:/app/autenticacion.py:ro
@@ -78,6 +89,11 @@ services:
       # crear los ficheros -wal y -shm aunque solo se lea.
       - ./datos:/app/datos
       - ./grabaciones:/app/grabaciones:ro
+      # Staging de las subidas. Va aparte de grabaciones/ para que la API pueda
+      # escribir sin abrir el directorio del audio a la web. **Crearlo antes**
+      # con el usuario del contenedor (uid 1000): si lo crea Docker al vuelo,
+      # queda de root y la API no puede escribir en el.
+      - ./subidas:/app/subidas
 
     # Solo localhost: se accede por tunel SSH. Abrirlo a la LAN exige
     # autenticacion primero (PLAN_INTERFAZ.md, seccion 6).

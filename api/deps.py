@@ -15,6 +15,7 @@ RAIZ = Path(__file__).resolve().parents[1]
 VARIABLE_SOLO_LECTURA = "TEAMS_API_SOLO_LECTURA"
 VARIABLE_WEB = "TEAMS_WEB_DIR"
 VARIABLE_AUTENTICACION = "TEAMS_AUTENTICACION"
+VARIABLE_SUBIDAS = "TEAMS_SUBIDAS"
 
 # Nombre de la cookie de sesion. En un solo sitio para que la ponga la ruta de
 # login y la lea el middleware sin que se puedan desincronizar.
@@ -54,6 +55,17 @@ def autenticacion_activa() -> bool:
     queden atados al primer valor.
     """
     return _verdadero(os.environ.get(VARIABLE_AUTENTICACION), True)
+
+
+def subidas_activas() -> bool:
+    """Si la web acepta grabaciones (I10b). Por defecto **no**.
+
+    No es una cuestion de permisos: un despliegue sin el trabajador instalado
+    aceptaria ficheros que se quedarian en la cola para siempre. Encenderlo es
+    una decision consciente, cuando el host ya sabe transcribir; la pagina lo
+    dice en pantalla en vez de ofrecer un boton que no lleva a ninguna parte.
+    """
+    return _verdadero(os.environ.get(VARIABLE_SUBIDAS), False)
 
 
 def cookie_segura() -> bool:
@@ -207,6 +219,40 @@ def conexion_escritura() -> Iterator[sqlite3.Connection]:
                     f"{path.parent / 'copias'} ({exc}); no se escribe sin ella."
                 ),
             )
+        yield conn
+    finally:
+        conn.close()
+
+
+def conexion_trabajos() -> Iterator[sqlite3.Connection]:
+    """Una conexion a la cola de subidas (`datos/trabajos.db`).
+
+    No pasa por `conexion_escritura` a proposito: `TEAMS_API_SOLO_LECTURA`
+    protege el historico de correcciones, no impide ingerir una reunion nueva.
+    Quien decide si se aceptan subidas es `TEAMS_SUBIDAS`, en la ruta.
+    """
+    try:
+        import trabajos
+    except Exception as exc:  # noqa: BLE001 - un despliegue a medias no tumba la web
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"No se pudo cargar el modulo de la cola de subidas ({exc}). "
+                "Monta trabajos.py en el contenedor para usar /api/trabajos."
+            ),
+        )
+    try:
+        conn = trabajos.conectar(entre_hilos=True)
+    except (OSError, sqlite3.Error) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"No se puede abrir la base de trabajos en "
+                f"{trabajos.ruta_bd()}: {exc}. Comprueba TEAMS_TRABAJOS_DB y "
+                f"que el volumen este montado."
+            ),
+        )
+    try:
         yield conn
     finally:
         conn.close()

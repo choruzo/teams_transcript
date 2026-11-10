@@ -1860,3 +1860,207 @@ footer .salir {
 footer .salir:hover { text-decoration: underline; text-underline-offset: 2px; }
 footer .salir:focus-visible { box-shadow: var(--foco); border-radius: var(--radio-s); }
 footer .salir[hidden] { display: none; }
+
+/* --- Subidas desde la web (I10b) --------------------------------------- */
+/* La zona de soltar es un <label> que contiene el input: así el clic y el
+   teclado funcionan sin JavaScript, y el arrastre se añade encima. */
+.zona-soltar {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  padding: 1.4rem 1rem;
+  border: 1px dashed var(--line);
+  border-radius: var(--radio);
+  background: color-mix(in srgb, var(--panel) 60%, transparent);
+  color: var(--dim);
+  cursor: pointer;
+  text-align: center;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.zona-soltar:hover,
+.zona-soltar.encima {
+  border-color: var(--verde2);
+  background: color-mix(in srgb, var(--verde2) 10%, var(--panel));
+  color: var(--text);
+}
+
+.zona-soltar:focus-within { border-color: var(--verde2); box-shadow: var(--foco); }
+.zona-soltar strong { color: var(--text); font-size: 0.95rem; }
+
+.zona-soltar input[type="file"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.filtros.subida { align-items: flex-start; }
+.filtros.subida .zona-soltar { flex: 1 1 100%; }
+
+#ficha-archivo {
+  flex: 1 1 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.1rem 0.2rem;
+}
+
+#nombre-archivo {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+#detalle-archivo { font-size: 0.8rem; }
+
+.trabajos {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.trabajo {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radio);
+  padding: 0.8rem 0.95rem;
+}
+
+.trabajo.estado-error,
+.trabajo.estado-interrumpido {
+  border-color: color-mix(in srgb, var(--rojo) 55%, var(--line));
+}
+
+.trabajo.estado-hecho {
+  border-color: color-mix(in srgb, var(--verde2) 55%, var(--line));
+}
+
+.trabajo-cabecera {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.3rem;
+}
+
+.trabajo-fecha { font-weight: 600; }
+
+.trabajo-nombre {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--dim);
+  overflow-wrap: anywhere;
+}
+
+.insignia {
+  display: inline-block;
+  padding: 0.12rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel2);
+  color: var(--dim);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.insignia.estado-hecho { color: var(--verde); border-color: color-mix(in srgb, var(--verde2) 55%, var(--line)); }
+.insignia.estado-error,
+.insignia.estado-interrumpido { color: var(--rojo); border-color: color-mix(in srgb, var(--rojo) 55%, var(--line)); }
+.insignia.estado-cancelado { color: var(--dim); }
+.insignia.estado-subiendo,
+.insignia.estado-encolado,
+.insignia.estado-preparando,
+.insignia.estado-transcribiendo,
+.insignia.estado-resumiendo,
+.insignia.estado-indexando { color: var(--azul); border-color: color-mix(in srgb, var(--azul) 45%, var(--line)); }
+
+.acciones-trabajo {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  margin-top: 0.55rem;
+}
+
+.acciones-trabajo button,
+#mensaje-subida button {
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.32rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radio-s);
+  background: var(--panel2);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.acciones-trabajo button:hover,
+#mensaje-subida button:hover {
+  border-color: var(--verde2);
+  color: var(--verde);
+}
+
+.acciones-trabajo button:disabled,
+#mensaje-subida button:disabled { opacity: 0.5; cursor: default; }
+
+.abrir-reunion { color: var(--azul); }
+.abrir-reunion:hover { color: var(--verde); }
+
+.trabajo-activo {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radio);
+  padding: 0.9rem 1rem;
+}
+
+.linea-estado {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+  margin-bottom: 0.6rem;
+}
+
+.trabajo-activo progress {
+  width: 100%;
+  height: 0.55rem;
+  margin-bottom: 0.6rem;
+  accent-color: var(--verde2);
+}
+
+.log {
+  margin: 0;
+  padding: 0.6rem 0.7rem;
+  max-height: 16rem;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radio-s);
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.error-trabajo {
+  margin: 0.35rem 0 0;
+  padding: 0.4rem 0.55rem;
+  background: color-mix(in srgb, var(--rojo) 8%, var(--panel));
+  border-left: 2px solid var(--rojo);
+  color: var(--rojo);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

@@ -731,7 +731,7 @@ pendientes de decidir, y ninguna bloquea el arranque:
 | 9 | **I8 — Informes** | 3.2 ampliado + descarga de Markdown | Bajo | **Fase 5 del motor** |
 | 10 | **I9 — Constelación 3D** | 3.7, si se decide hacerla | Medio | I1 |
 | 11 | **I10a — Re-resumir** | primer nivel de 3.8: relanzar el resumen sobre un `.txt` existente | Bajo | I2, D0 |
-| 12 | **I10b — Subir y transcribir** | segundo nivel de 3.8: cola `jobs`, trabajador systemd en el host, SSE de progreso | **Alto** | I10a |
+| 12 | ~~**I10b — Subir y transcribir**~~ **implementada y probada en producción, también por el portal (2026-11-10)** | segundo nivel de 3.8: cola `jobs`, trabajador systemd en el host, SSE de progreso | **Alto** | I10a |
 | ~~13~~ | ~~**I11 — Sugerencias de duplicados**~~ **hecha (2026-11-10)** | en el panel, «posible duplicado de…» con *Fusionar* / *No es la misma*; lista de pendientes en el tablero | Bajo | I6a, ~~Fase 8 del motor~~ **hecha (2026-11-10)** |
 
 **Dependencia crítica de I6a:** igual que I5 con la Fase 4, no se escribe
@@ -1425,6 +1425,115 @@ dimensiones), 0 nuevas y 0 retiradas porque ya estaba al día. Con sesión,
 `/app5/reunion.html` y `/login.html`, y `/api/login` deja entrar. Los comandos
 para repetir la migración y el indexado (dentro del contenedor) están en
 `docker/DESPLIEGUE.md`, sección 5 bis.
+
+---
+
+## 9 undecies. Resultado de I10b (2026-11-10)
+
+Ficheros nuevos: `trabajos.py` (cola en `datos/trabajos.db`, stdlib pura),
+`trabajador_teams.py` (host), `web/subir.html`, `web/js/subir.js`,
+`trabajador-teams.service` y `.env.trabajador.ejemplo`. Tocados:
+`api/deps.py`, `api/main.py`, `api/modelos.py`, `api/rutas/trabajos.py`,
+`web/js/api.js`, las cinco páginas (enlace «Subir»), `web/css/estilo.css`,
+`docker-compose.yml`, `proxy/portal`, `.gitignore`, `README.md` y
+`docker/DESPLIEGUE.md`. Tests: `tests/test_trabajos.py`,
+`tests/test_api_trabajos.py`, `tests/test_trabajador.py` (497 en total).
+
+Decisiones tomadas al implementarla:
+
+1. **La cola vive en `datos/trabajos.db`, no en `meetings.db`.** Es estado
+   operativo, no histórico: no obliga a subir `ESQUEMA_VERSION` ni a migrar el
+   histórico, y la API puede escribir en ella aunque
+   `TEAMS_API_SOLO_LECTURA=1`, igual que ya hace con `usuarios.db`.
+2. **`subidas/` es un volumen nuevo y escribible; `grabaciones/` sigue en solo
+   lectura.** La API escribe los `.part` en `subidas/`; el trabajador mueve el
+   fichero ya validado a `grabaciones/` con el nombre del que depende
+   `inferir_fecha`. Hay que crear `subidas/` con el uid 1000 antes de
+   `docker compose up -d`: si lo crea Docker, queda de root y la API no puede
+   escribir.
+3. **Subida por trozos de 16 MB con cuerpo crudo**, no `multipart/form-data`.
+   Evita `python-multipart` en la imagen (no está instalado y añadirlo obliga a
+   reexportarla) y permite reanudar. Cada `PUT` confirma bytes en la base; el
+   fichero `.part` se trunca a los confirmados si un corte dejó un trozo a
+   medias. Un trozo ya confirmado se compara siempre por hash, aunque el
+   cliente no mande `X-Sha256`.
+4. **«Entero» se comprueba en tres capas**: longitud de cada trozo (y su
+   SHA-256 si el navegador tiene `crypto.subtle`), sha256 del fichero completo y
+   validación RIFF/WAVE (incluye `WAVE_FORMAT_EXTENSIBLE`, que `wave.open`
+   rechaza). El duplicado se detecta por ese sha256 y da 409 con enlace a la
+   reunión existente; `forzar` lo procesa igualmente.
+5. **El nombre final no se pisa.** Si el original ya cumple
+   `AAAAMMDD_HHMMSS_mixed`, se respeta; si no, se genera con la fecha/hora
+   elegidas. Si ya existe en `grabaciones/`, se sufija `-2`, `-3`… Dos
+   reuniones distintas no pueden compartir ruta o el reproceso reconciliaría
+   una con la otra.
+6. **El trabajador es un servicio de usuario** (`systemd --user`, `Linger=yes`
+   ya activo), no una unidad de sistema: se instala sin root. Necesita
+   `EnvironmentFile=.env.trabajador` porque en el host `host.docker.internal`
+   no resuelve: `TEAMS_EMBED_BASE_URL=http://127.0.0.1:8081/v1`, y
+   `HF_HUB_OFFLINE=1` para que pyannote use la caché sin token.
+7. **`start` a secas para recuperar el LLM**, nunca `is-active`: la regla de
+   sudo del servidor permite `start`/`stop` de `llama-qwen3-8` pero no
+   `is-active`, y arrancar un servicio ya activo es inofensivo. Se llama en el
+   `finally` del trabajo y al arrancar el trabajador, para que un SIGTERM o una
+   caída no dejen el chat parado.
+8. **Cancelar un trabajo en curso lo mata el trabajador, no la API.** La API
+   pone la bandera; el trabajador mata el grupo de procesos (Whisper/pyannote
+   incluidos), arranca el LLM y marca `cancelado`. Si el que se para es el
+   trabajador, el trabajo queda `interrumpido` y no se reintenta solo.
+9. **Reanudar no repite lo caro**: si hay `.txt` se empieza por el resumen, y
+   si además hay `_resumen.md`, solo por el índice. Los ficheros vacíos no
+   cuentan. `POST /reintentar` solo reencola lo que falló o se interrumpió y
+   conserva el audio.
+10. **Apagado por defecto** (`TEAMS_SUBIDAS=0`): un despliegue sin trabajador
+    no enseña una cola muerta. La página pide `TEAMS_SUBIDAS=1` y avisa si el
+    latido del trabajador falta, sin impedir dejar el fichero en cola.
+11. **Nginx** necesitaba tres cosas que no tenía: `client_max_body_size 64m`
+    (el límite por defecto es 1 MB y cualquier trozo daba 413),
+    `proxy_request_buffering off` y `proxy_buffering off` con timeouts de una
+    hora para el SSE. Va en `proxy/portal`, que sí se versiona.
+12. **La página no inventa progreso**: enseña estado, paso, tiempo y el final
+    del log. El porcentaje exacto de Whisper no existe; la duración del audio
+    sí la sabe el navegador al elegir el fichero.
+
+**Verificado en producción (2026-11-10):** la prueba de corte y reanudación
+funcionó con 19,2 MB: se subió el primer trozo, se añadieron 12 KB de basura al
+`.part`, se reanudó y el servidor truncó el sobrante; el `sha256` final fue
+idéntico al del fichero original. La cancelación en cola también respondió.
+Después, un clip real de 60 s con `large-v3` + diarización + `daily` produjo una
+reunión con 12 segmentos, 3 acciones y 1 riesgo, su `_resumen.md` y 1 fragmento
+indexado, y `llama-qwen3-8` quedó activo al terminar. La reunión de prueba se
+retiró después (histórico de vuelta a 14 reuniones / 139 acciones) con copia en
+`backups/pre-cleanup-i10b/`.
+
+La prueba con GPU destapó cuatro cosas que no se ven con un pipeline falso:
+
+1. **La ruta del `.part` no puede ser absoluta.** La API guardaba
+   `/app/subidas/<uid>.part` y el trabajador del host no la encontraba. Ahora
+   la cola guarda solo el nombre y cada lado lo resuelve con su
+   `TEAMS_SUBIDAS_DIR`; las filas antiguas caen al nombre si la ruta absoluta
+   no existe.
+2. **`reintentar` no puede comprobar `audio_path` desde el contenedor**: la API
+   no ve `grabaciones/` y daba 422 aunque el audio existiera. Si `audio_path`
+   viene puesto se confía en el trabajador, que es quien comprueba el fichero
+   antes de lanzar nada.
+3. **El `reunion_uid` se busca por el `.txt`, no por el `.wav`.** La base
+   guarda `transcript_path`; buscar por el audio dejaba el enlace a la reunión
+   vacío aunque el resumen y el índice estuvieran bien.
+4. **LiteLLM puede devolver 503 «Loading model» después de la espera.** El
+   sondeo de `/models` no basta con el proxy delante. La unidad del trabajador
+   pasa `--espera 120` y el trabajador reintenta el resumen hasta dos veces
+   (60 s entre intentos) si el último intento murió por un 503 o «Loading
+   model», sin repetir la transcripción.
+
+**Recargado nginx y verificado por el portal (2026-11-10):** `/app5/`,
+`/app5/subir.html` y `/subir.html` responden 200 con sesión, y un `PUT` de
+16 MB por `https://…:8443/api/trabajos/.../partes/0` se acepta con
+`recibidos: 16777216` (con el límite por defecto de 1 MB habría sido 413). La
+prueba en un navegador real queda pendiente de que alguien abra la página; el
+JS se ha comprobado con Node y la API/SSE con `curl`. La retención de audio
+sigue sin decidir (hoy solo se avisa del espacio; no se borra nada) y el máximo
+de 2 GB se revisará con los tiempos medidos.
 
 ---
 

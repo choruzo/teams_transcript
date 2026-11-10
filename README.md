@@ -472,6 +472,35 @@ Detalles útiles:
   `--tipo`, `--attendees`, `--arrastres`, `--glosario`...); `python
   procesar_teams.py --help` los lista.
 
+## Uso: subir una grabación desde la web (`subir.html`)
+
+Con el **trabajador de subidas** instalado en el servidor (ver
+[`docker/DESPLIEGUE.md`](docker/DESPLIEGUE.md), sección 6), la página «Subir»
+acepta un `.wav` ya mezclado (el `_mixed.wav` de `record_teams.py`), lo
+transcribe, lo resume y lo indexa sin tocar la consola:
+
+1. Se elige el fichero, la fecha/hora de la reunión, el tipo, el modelo de
+   Whisper y si se quieren identificar hablantes. Los valores por defecto son
+   `large-v3`, diarizar y `daily`; se pueden cambiar en cada subida.
+2. El fichero se envía **por trozos de 16 MB**. Si la conexión se corta, al
+   volver a elegir el mismo fichero la página ofrece reanudar por los bytes que
+   el servidor ya confirmó, en vez de empezar de cero.
+3. Al terminar la subida se valida la cabecera RIFF/WAVE, se calcula su
+   `sha256` y se pone en la cola. Si ese mismo audio ya se subió, avisa y
+   enlaza a la reunión existente en vez de duplicarla.
+4. El trabajador procesa **un trabajo a la vez** y muestra el progreso y el log
+   en vivo. Mientras transcribe, el chat de la web está parado: Whisper y el
+   modelo de chat no caben a la vez en la GPU. El resto de la web sigue
+   funcionando.
+5. Si algo falla, el trabajo queda con su código de salida y el final del log,
+   y se puede **reintentar** sin volver a subir el audio. Al reintentar se
+   reanuda desde el último paso que dejó fichero (transcribir, resumir o
+   indexar).
+
+La subida está **apagada por defecto** (`TEAMS_SUBIDAS=0`): sin el trabajador
+instalado, el fichero se quedaría en la cola para siempre. La página lo dice en
+vez de ofrecer un botón que no lleva a ninguna parte.
+
 ## Notas técnicas
 
 - La captura del audio del sistema solo produce datos mientras el motor de
