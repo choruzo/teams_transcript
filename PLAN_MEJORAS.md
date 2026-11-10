@@ -1005,6 +1005,13 @@ Para desplegar: `python memoria.py --migrar` en el servidor (esquema 4 → 5)
 antes de actualizar la API; en solo lectura responde 503 con la base atrasada.
 Después, `python indexar_teams.py --acciones` para crear los primeros vectores.
 
+**Hecho en el servidor el 2026-11-10**, sobre el histórico real (14 reuniones,
+139 acciones): `--acciones` no encontró nada que hacer (0 nuevas, 0 retiradas)
+y `GET /api/sugerencias` devuelve `disponible:true` con las 6 parejas del
+umbral. Los dos comandos, en su forma para el contenedor, están en
+`docker/DESPLIEGUE.md` (sección 5 bis), junto con la verificación del portal y
+del login.
+
 ---
 
 ## 4. Orden de implementación recomendado

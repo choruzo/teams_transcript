@@ -1416,6 +1416,16 @@ tras **reconstruir el índice entero** (`indexar_teams.py --acciones
 **Pendiente:** nada de I11. El panel no enseña los títulos de las reuniones de
 cada lado (solo la fecha); la ficha sí los tiene al abrir la acción.
 
+**Desplegado en producción (2026-11-10):** imagen `teams-transcript-api:0.2.0`
+(con `sqlite-vec`), esquema **5** migrado y `indexar_teams.py --acciones`
+ejecutado sobre el histórico real: 139 acciones con vector (`bge-m3`, 1024
+dimensiones), 0 nuevas y 0 retiradas porque ya estaba al día. Con sesión,
+`GET /api/sugerencias` devuelve `disponible: true` y las 6 parejas del umbral
+0,74; a través del portal responden 200 `/app5/`, `/app5/acciones.html`,
+`/app5/reunion.html` y `/login.html`, y `/api/login` deja entrar. Los comandos
+para repetir la migración y el indexado (dentro del contenedor) están en
+`docker/DESPLIEGUE.md`, sección 5 bis.
+
 ---
 
 ## 10. Deuda que este plan destapa en el motor

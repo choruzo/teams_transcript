@@ -58,10 +58,16 @@ Debe responder `"base_accesible": true` y el número de reuniones que hay en la
 base. Si dice que **la base está en un esquema anterior**, migrarla:
 
 ```bash
-python3 memoria.py --migrar
+# Antes, una copia
+cp datos/meetings.db datos/meetings.db.bak
+
+# Desde el contenedor: usa el mismo volumen y el mismo usuario que la API
+docker compose exec -T api python memoria.py --migrar
 ```
 
-(Antes, una copia: `cp datos/meetings.db datos/meetings.db.bak`.)
+(El comando también funciona en el host mientras el usuario tenga escritura en
+`datos/`; si falla con `attempt to write a readonly database`, usa la forma del
+contenedor, que es la que siempre tiene permiso.)
 
 ## 5. Acceder desde el portátil
 
@@ -88,6 +94,51 @@ Abrirlo a la red interna **exige autenticación primero** (`PLAN_INTERFAZ.md`,
 sección 6): el login ya existe, pero sin él cualquiera de la red leería la
 transcripción literal de todas las reuniones.
 
+## 5 bis. Verificación hecha en producción (2026-11-10)
+
+Estado comprobado en el servidor tras desplegar la Fase 8 y I11: imagen
+`teams-transcript-api:0.2.0` (con `sqlite-vec` dentro), esquema **5** en
+`meetings.db`, login activo y **139 acciones con vector** en `indice.db`
+(`bge-m3`, 1024 dimensiones) para las sugerencias de duplicados. La API
+responde con sesión `GET /api/sugerencias` → `disponible: true` y 6 parejas, y
+el portal sirve `/app5/`, `/app5/acciones.html`, `/app5/reunion.html` y
+`/login.html` por el 8443.
+
+Antes de migrar o indexar se dejó una copia en
+`backups/despliegue-20261110/` (`meetings.db` e `indice.db`). Los dos comandos
+son idempotentes y hoy no tienen nada que hacer:
+
+```bash
+cd ~/teams_transcript
+
+# 1. Esquema: responde "ya estaba en el esquema 5, nada que hacer."
+docker compose exec -T api python memoria.py --migrar
+
+# 2. Indice: responde "14 al dia" y "139 acciones al dia, 0 nuevas, 0 retiradas"
+docker compose exec -T api python - --acciones < indexar_teams.py
+```
+
+El paso 2 va por `stdin` a proposito: `indexar_teams.py` **no** está montado en
+el contenedor (no lo necesita la API), y pasarlo así evita copiarlo dentro. El
+directorio de trabajo del contenedor es `/app`, que es donde viven `memoria.py`,
+`rag.py` y `llm.py`, así que los imports resuelven. `-T` es lo que impide que
+Compose asigne una TTY y rompa la redirección.
+
+Para repetir la verificación funcional hace falta sesión:
+
+```bash
+PW=$(sed -n 's/^TEAMS_ADMIN_CLAVE=//p' .env)
+curl -s -c /tmp/ck.txt -H 'Content-Type: application/json' \
+     -d "{\"usuario\":\"admin\",\"clave\":\"$PW\"}" localhost:8080/api/login
+curl -s -b /tmp/ck.txt localhost:8080/api/sugerencias
+curl -s -b /tmp/ck.txt -X POST localhost:8080/api/logout
+
+# Lo mismo a través del portal (certificado autofirmado)
+for p in /app5/ /app5/acciones.html /app5/reunion.html /login.html; do
+  printf '%s -> ' "$p"; curl -sk -o /dev/null -w '%{http_code}\n' "https://127.0.0.1:8443$p"
+done
+```
+
 ## Actualizar
 
 | Qué cambió | Qué hay que hacer |
@@ -96,6 +147,8 @@ transcripción literal de todas las reuniones.
 | `summarize_teams.py`, `glosario.py` | igual: la API los monta porque reutiliza `renderizar_markdown` y los títulos de `TIPOS` |
 | `requirements-api.txt` | `exportar.ps1` con una versión nueva, `scp`, `docker load`, actualizar el tag en `docker-compose.yml`, `docker compose up -d` |
 | `docker-compose.yml` | `scp` + `docker compose up -d` |
+| Esquema de la BD (`ESQUEMA_VERSION`) | copia + `docker compose exec -T api python memoria.py --migrar`; después, `docker compose exec -T api python - --acciones < indexar_teams.py` |
+
 
 Al subir de versión, la imagen antigua se queda ocupando disco:
 `docker image rm teams-transcript-api:0.1.0` cuando la nueva funcione.
